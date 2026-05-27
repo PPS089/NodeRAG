@@ -639,6 +639,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-mmr", action="store_true", help="关闭 MMR 去冗余。")
     parser.add_argument("--no-table-aware", action="store_true", help="关闭表格问题 table_chunk 加权。")
     parser.add_argument("--no-expand", action="store_true", help="关闭 small-to-big 上下文扩展。")
+    parser.add_argument("--output", "-o", help="输出 JSON 文件；不传则打印到 stdout。")
     return parser.parse_args()
 
 
@@ -670,7 +671,11 @@ def main() -> Dict[str, Any]:
         mmr_lambda=args.mmr_lambda,
         expand_context=not args.no_expand,
     )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    output_text = json.dumps(result, ensure_ascii=False, indent=2)
+    if args.output:
+        Path(args.output).write_text(output_text, encoding="utf-8")
+    else:
+        print(output_text)
     return result
 
 

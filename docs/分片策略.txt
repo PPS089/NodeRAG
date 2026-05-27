@@ -1,0 +1,6 @@
+section_chunk：按 Markdown 标题 # / ## / ### 建立章节结构
+text_chunk：正文按段落聚合，超过约 1200 字符时尽量按句号、问号、换行等自然边界切分，并保留约 120 字符重叠
+table_chunk：HTML 表格和 Markdown 表格单独成块，表格内容会转成 table_text 供检索使用
+image_chunk：Markdown 图片单独成块，正文中用 IMAGE_REF 引用
+引用关系：正文中遇到表格/图片，会生成 TABLE_REF / IMAGE_REF，保留文本块与结构化块之间的关联
+检索增强：每个 chunk 增加 embedding_text，包含文档名、章节路径和正文/表格摘要，后续应优先用它做向量化

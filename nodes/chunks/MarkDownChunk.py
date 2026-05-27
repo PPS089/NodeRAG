@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html as html_lib
+import hashlib
 import json
 import re
 import sys
@@ -13,7 +14,9 @@ from utils.FindProjectRoot import find_project_root as fr
 TABLE_REF_TEMPLATE = "TABLE_REF:{chunk_id}"
 IMAGE_REF_TEMPLATE = "IMAGE_REF:{chunk_id}"
 
-MAX_TEXT_CHUNK_CHARS = 8000
+MAX_TEXT_CHUNK_CHARS = 1200
+TEXT_CHUNK_OVERLAP_CHARS = 120
+MAX_TABLE_TEXT_CHARS = 8000
 MAX_TABLE_ROWS_PER_CHUNK = 30
 MAX_CELL_TEXT_CHARS = 500
 MAX_IMAGE_LINE_LENGTH = 200_000
@@ -36,12 +39,69 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
+def content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def truncate_text(text: Optional[str], max_chars: int) -> str:
     if text is None:
         return ""
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + f"...[TRUNCATED {len(text) - max_chars} chars]"
+
+
+def infer_document_name(source_path: str) -> str:
+    """
+    从 MinerUResult/<文档名>_<hash>/DataCleaned.md 推断文档名。
+    """
+
+    path = Path(source_path)
+    parent_name = path.parent.name
+
+    if parent_name:
+        return re.sub(r"_[0-9a-f]{12}$", "", parent_name)
+
+    return path.stem
+
+
+def format_title_path(title_path: Sequence[str]) -> str:
+    return " > ".join(title for title in title_path if title)
+
+
+def build_embedding_text(chunk: Dict[str, Any]) -> str:
+    """
+    为后续向量化准备更适合检索的文本。
+
+    保留原 content 字段不变，embedding_text 只作为索引文本。
+    """
+
+    parts = [f"文档: {chunk.get('document_name', '')}"]
+    title_path = format_title_path(chunk.get("title_path", []))
+    if title_path:
+        parts.append(f"章节: {title_path}")
+
+    chunk_type = chunk.get("type")
+    if chunk_type == "section_chunk":
+        parts.append(f"标题: {chunk.get('title', chunk.get('content', ''))}")
+    elif chunk_type == "table_chunk":
+        table_description = chunk.get("table_description")
+        table_text = chunk.get("table_text")
+        if table_description:
+            parts.append(str(table_description))
+        if table_text:
+            parts.append(str(table_text))
+    elif chunk_type == "image_chunk":
+        alt_text = chunk.get("alt_text")
+        image_path = chunk.get("image_path")
+        if alt_text:
+            parts.append(f"图片说明: {alt_text}")
+        if image_path:
+            parts.append(f"图片路径: {image_path}")
+    else:
+        parts.append(str(chunk.get("content", "")))
+
+    return "\n".join(part for part in parts if part).strip()
 
 
 def normalize_cell_text(value: str) -> str:
@@ -137,6 +197,9 @@ def make_chunk(
         "id": new_id(chunk_type),
         "type": chunk_type,
         "content": content,
+        "content_hash": content_hash(content),
+        "document_name": infer_document_name(source_path),
+        "source_file": Path(source_path).name,
         "title_path": list(title_path),
         "source_path": source_path,
         "line_range": [line_start, line_end],
@@ -146,6 +209,7 @@ def make_chunk(
     }
     if extra:
         chunk.update(extra)
+    chunk.setdefault("embedding_text", build_embedding_text(chunk))
     return chunk
 
 
@@ -344,7 +408,7 @@ def parse_markdown_table_cells(line: str) -> List[str]:
 
 def markdown_table_to_text(table_lines: Sequence[str], row_offset: int = 0) -> str:
     if len(table_lines) < 2:
-        return truncate_text("".join(table_lines), MAX_TEXT_CHUNK_CHARS)
+        return truncate_text("".join(table_lines), MAX_TABLE_TEXT_CHARS)
 
     rows: List[List[str]] = []
     for line in table_lines:
@@ -365,7 +429,7 @@ def markdown_table_to_text(table_lines: Sequence[str], row_offset: int = 0) -> s
             pairs.append(f"{header}: {value}")
         output.append(f"Row {row_idx}: " + "; ".join(pairs))
 
-    return truncate_text("\n".join(output), MAX_TEXT_CHUNK_CHARS)
+    return truncate_text("\n".join(output), MAX_TABLE_TEXT_CHARS)
 
 
 def describe_markdown_table(
@@ -434,7 +498,7 @@ def is_key_value_table(rows: Sequence[Sequence[str]]) -> bool:
 def html_table_to_text(html_text: str, row_offset: int = 0) -> str:
     rows = parse_html_rows(html_text)
     if not rows:
-        return truncate_text(html_text, MAX_TEXT_CHUNK_CHARS)
+        return truncate_text(html_text, MAX_TABLE_TEXT_CHARS)
 
     if is_key_value_table(rows):
         output = []
@@ -445,7 +509,7 @@ def html_table_to_text(html_text: str, row_offset: int = 0) -> str:
                 value = row[i + 1] if i + 1 < len(row) else ""
                 pairs.append(f"{key}: {value}")
             output.append(f"Row {row_idx}: " + "; ".join(pairs))
-        return truncate_text("\n".join(output), MAX_TEXT_CHUNK_CHARS)
+        return truncate_text("\n".join(output), MAX_TABLE_TEXT_CHARS)
 
     headers = rows[0]
     data_rows = rows[1:]
@@ -456,7 +520,7 @@ def html_table_to_text(html_text: str, row_offset: int = 0) -> str:
             header = headers[i] if i < len(headers) else f"column_{i + 1}"
             pairs.append(f"{header}: {value}")
         output.append(f"Row {row_idx}: " + "; ".join(pairs))
-    return truncate_text("\n".join(output), MAX_TEXT_CHUNK_CHARS)
+    return truncate_text("\n".join(output), MAX_TABLE_TEXT_CHARS)
 
 
 def describe_html_table(html_text: str) -> str:
@@ -482,6 +546,82 @@ def describe_html_table(html_text: str) -> str:
     return f"HTML table with {data_rows} data rows and {col_count} columns. Columns: {', '.join(shown_headers)}{more}."
 
 
+def split_long_text_by_boundary(
+    text: str,
+    max_chars: int = MAX_TEXT_CHUNK_CHARS,
+    overlap_chars: int = TEXT_CHUNK_OVERLAP_CHARS,
+) -> List[str]:
+    """
+    长文本按自然边界切分，避免在句子中间硬切。
+    """
+
+    if len(text) <= max_chars:
+        return [text]
+
+    parts: List[str] = []
+    start = 0
+    boundary_chars = "\n。！？；.!?;"
+
+    while start < len(text):
+        hard_end = min(start + max_chars, len(text))
+        end = hard_end
+
+        if hard_end < len(text):
+            boundary = max(text.rfind(ch, start, hard_end) for ch in boundary_chars)
+            if boundary > start + max_chars // 2:
+                end = boundary + 1
+
+        part = text[start:end].strip()
+        if part:
+            parts.append(part)
+
+        if end >= len(text):
+            break
+
+        next_start = max(end - overlap_chars, start + 1)
+        if next_start <= start:
+            next_start = end
+        start = next_start
+
+    return parts
+
+
+def collect_text_units(text_buffer: List[Tuple[int, str]]) -> List[Tuple[int, int, str]]:
+    """
+    把连续正文按空行聚合成段落单元。
+    """
+
+    units: List[Tuple[int, int, str]] = []
+    current_lines: List[str] = []
+    current_start_line: Optional[int] = None
+    current_end_line: Optional[int] = None
+
+    def emit() -> None:
+        nonlocal current_lines, current_start_line, current_end_line
+        if current_lines and current_start_line is not None and current_end_line is not None:
+            content = "".join(current_lines).strip()
+            if content:
+                units.append((current_start_line, current_end_line, content))
+        current_lines = []
+        current_start_line = None
+        current_end_line = None
+
+    for line_no, line in text_buffer:
+        if not line.strip():
+            if current_lines:
+                current_end_line = line_no
+            emit()
+            continue
+
+        if current_start_line is None:
+            current_start_line = line_no
+        current_end_line = line_no
+        current_lines.append(line)
+
+    emit()
+    return units
+
+
 def flush_text_buffer(
     chunks: List[Dict[str, Any]],
     chunks_by_id: Dict[str, Dict[str, Any]],
@@ -498,17 +638,17 @@ def flush_text_buffer(
     title_path = current_title_path(section_stack)
     pending_refs = list(text_refs)
 
-    current_lines: List[str] = []
+    current_parts: List[str] = []
     current_start_line: Optional[int] = None
     current_end_line: Optional[int] = None
     current_size = 0
 
     def emit() -> None:
-        nonlocal current_lines, current_start_line, current_end_line, current_size
-        if not current_lines or current_start_line is None or current_end_line is None:
+        nonlocal current_parts, current_start_line, current_end_line, current_size
+        if not current_parts or current_start_line is None or current_end_line is None:
             return
 
-        content = "".join(current_lines).strip("\n")
+        content = "\n\n".join(current_parts).strip()
         if content.strip():
             refs_for_chunk = [ref for ref in pending_refs if ref["ref"] in content]
             chunk = make_chunk(
@@ -532,33 +672,28 @@ def flush_text_buffer(
                 if target is not None:
                     target.setdefault("referenced_by_text_chunk_ids", []).append(chunk["id"])
 
-        current_lines = []
+        current_parts = []
         current_start_line = None
         current_end_line = None
         current_size = 0
 
-    for line_no, line in text_buffer:
-        remaining = line
-        if remaining == "":
-            continue
+    units = collect_text_units(text_buffer)
+    for unit_start_line, unit_end_line, unit_content in units:
+        unit_parts = split_long_text_by_boundary(unit_content)
 
-        while remaining:
+        for part in unit_parts:
             if current_start_line is None:
-                current_start_line = line_no
+                current_start_line = unit_start_line
 
-            available = MAX_TEXT_CHUNK_CHARS - current_size
-            if available <= 0:
+            separator_size = 2 if current_parts else 0
+            if current_parts and current_size + separator_size + len(part) > MAX_TEXT_CHUNK_CHARS:
                 emit()
-                continue
+                current_start_line = unit_start_line
+                separator_size = 0
 
-            part = remaining[:available]
-            remaining = remaining[available:]
-            current_lines.append(part)
-            current_end_line = line_no
-            current_size += len(part)
-
-            if current_size >= MAX_TEXT_CHUNK_CHARS:
-                emit()
+            current_parts.append(part)
+            current_end_line = unit_end_line
+            current_size += separator_size + len(part)
 
     emit()
     text_buffer.clear()
@@ -886,28 +1021,109 @@ def split_markdown(input_md: str | Path, skip_toc: bool = True) -> List[Dict[str
     return chunks
 
 
-def main(input_md: str | Path = "full.md") -> List[Dict[str, Any]]:
+def chunk_md_file(
+    input_md: str | Path,
+    output_path: str | Path | None = None,
+    skip_toc: bool = True,
+) -> Tuple[Path, List[Dict[str, Any]]]:
     """
-    input_md 是 Markdown 输入文件。
-    返回 chunks，并在同目录写出 <input_md>.chunks.json。
+    对单个 Markdown 文件分片，并写出 chunks JSON。
     """
+
     input_md = Path(input_md)
-    chunks = split_markdown(input_md, skip_toc=True)
+    chunks = split_markdown(input_md, skip_toc=skip_toc)
 
-    output_path = input_md.with_suffix(".chunks.json")
-    output_path.write_text(json.dumps(chunks, ensure_ascii=False, indent=2), encoding="utf-8")
+    if output_path is None:
+        output_file = input_md.with_suffix(".chunks.json")
+    else:
+        output_file = Path(output_path)
 
-    print(json.dumps(chunks, ensure_ascii=False, indent=2))
-    return chunks
+    output_file.write_text(json.dumps(chunks, ensure_ascii=False, indent=2), encoding="utf-8")
+    return output_file, chunks
+
+
+def find_datacleaned_md_files(
+    result_dir: str | Path | None = None,
+    input_name: str = "DataCleaned.md",
+) -> List[Path]:
+    """
+    查找 MinerUResult 下每个文档目录中的 DataCleaned.md。
+    """
+
+    project_root = fr()
+    mineru_result_dir = Path(result_dir) if result_dir else project_root / "MinerUResult"
+
+    if not mineru_result_dir.exists():
+        raise FileNotFoundError(f"MinerUResult 目录不存在: {mineru_result_dir}")
+
+    if not mineru_result_dir.is_dir():
+        raise ValueError(f"不是有效目录: {mineru_result_dir}")
+
+    return sorted(
+        path
+        for path in mineru_result_dir.glob(f"*/{input_name}")
+        if path.is_file()
+    )
+
+
+def count_chunk_types(chunks: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for chunk in chunks:
+        chunk_type = str(chunk.get("type", "unknown"))
+        counts[chunk_type] = counts.get(chunk_type, 0) + 1
+    return counts
+
+
+def chunk_mineru_result_dir(
+    result_dir: str | Path | None = None,
+    input_name: str = "DataCleaned.md",
+    skip_toc: bool = True,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    批量处理 MinerUResult 下的 DataCleaned.md。
+    """
+
+    input_files = find_datacleaned_md_files(result_dir=result_dir, input_name=input_name)
+    if not input_files:
+        target_dir = Path(result_dir) if result_dir else fr() / "MinerUResult"
+        raise FileNotFoundError(f"未找到待分片 Markdown: {target_dir}/*/{input_name}")
+
+    outputs: Dict[str, Dict[str, Any]] = {}
+    for input_file in input_files:
+        output_file, chunks = chunk_md_file(input_file, skip_toc=skip_toc)
+        outputs[str(input_file)] = {
+            "output_path": str(output_file),
+            "chunk_count": len(chunks),
+            "chunk_type_counts": count_chunk_types(chunks),
+        }
+
+    return outputs
+
+
+def main(input_md: str | Path | None = None) -> List[Dict[str, Any]] | Dict[str, Dict[str, Any]]:
+    """
+    input_md 传入时处理单个 Markdown；不传时批量处理 MinerUResult/*/DataCleaned.md。
+    """
+
+    if input_md is not None:
+        output_file, chunks = chunk_md_file(input_md)
+        print(f"分片完成: {input_md}")
+        print(f"输出文件: {output_file}")
+        print(f"chunk 数量: {len(chunks)}")
+        print(f"类型分布: {count_chunk_types(chunks)}")
+        return chunks
+
+    outputs = chunk_mineru_result_dir()
+    print(f"批量分片完成，共处理 {len(outputs)} 个 Markdown:")
+    for input_file, summary in outputs.items():
+        print(f"- {input_file}")
+        print(f"  输出文件: {summary['output_path']}")
+        print(f"  chunk 数量: {summary['chunk_count']}")
+        print(f"  类型分布: {summary['chunk_type_counts']}")
+
+    return outputs
 
 
 if __name__ == "__main__":
-    path = fr()
-
-    input_md = (
-            path
-            / ".mineru_cache"
-            / "5ac5a6c3b1da4f87b1045865a51cbcf4e73faad43f5873e6676946902f981f64"
-            / "DataCleaned.md"
-    )
-    chunks = main(input_md)
+    cli_input = sys.argv[1] if len(sys.argv) > 1 else None
+    main(cli_input)

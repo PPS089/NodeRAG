@@ -1,0 +1,20 @@
+NodeRAG
+|
+|--data # 测试数据
+|
+|--docs # 文档
+|   |--项目结构说明1.txt
+|
+|--MinerUResult # PDF 处理结果
+|
+|--nodes # RAG 的单处理节点
+|   |--auth # 权限校验节点
+|       |--UserCodeAuth.py # 代码校验
+|       |--userLLMAuth.py # 大模型校验
+|   |--chunks # 分片节点
+|       |--MarkDownChunk.py # 对 md 文档的切分处理
+|   |--documents #文档处理节点
+|       |--DataClean.py # 数据清洗
+|       |--MinerUStandardReader.py # 使用 MinerU 处理 PDF 文档
+|
+|--utils # 工具包

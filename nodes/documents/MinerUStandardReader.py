@@ -3,6 +3,7 @@ import time
 import json
 import hashlib
 import zipfile
+import shutil
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
@@ -28,15 +29,21 @@ class MinerUStandardReader:
         timeout: int = 600,
         interval: int = 5,
         cache_dir: Optional[str] = None,  # 缓存目录
+        result_dir: Optional[str] = None,  # MinerU 解析结果输出目录
     ):
         # 获取项目文件根目录
         project_root = fr()
+        self.project_root = project_root
         # 设置 .env 文件
         load_dotenv(project_root / ".env")
 
         # 缓存目录
         self.cache_dir = Path(cache_dir) if cache_dir else project_root / ".mineru_cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # MinerU 解析结果输出目录
+        self.result_dir = Path(result_dir) if result_dir else project_root / "MinerUResult"
+        self.result_dir.mkdir(parents=True, exist_ok=True)
 
         # 优先使用外部传入的 token
         # 如果没有传入，则读取环境变量 MINERU_API_TOKEN
@@ -146,6 +153,9 @@ class MinerUStandardReader:
         # 元数据缓存路径
         meta_path = self.cache_dir / f"{cache_key}.json"
 
+        # 当前 PDF 的独立解析结果目录
+        document_result_dir = self._make_document_result_dir(path, file_hash)
+
         # 如果缓存存在，并且用户没有强制重新解析
         if cache_path.exists() and not force_reparse:
             # 如果需要用户确认是否重新解析
@@ -156,13 +166,27 @@ class MinerUStandardReader:
 
                 # 用户没有输入 y，则直接返回缓存
                 if user_input != "y":
-                    return cache_path.read_text(encoding="utf-8")
+                    markdown = cache_path.read_text(encoding="utf-8")
+                    self._restore_cached_result(
+                        cache_key=cache_key,
+                        document_result_dir=document_result_dir,
+                        markdown=markdown,
+                        meta_path=meta_path,
+                    )
+                    return markdown
 
                 # 用户输入 y，则继续往下走，重新调用 MinerU API
 
             else:
                 # 默认不重复解析，直接返回缓存
-                return cache_path.read_text(encoding="utf-8")
+                markdown = cache_path.read_text(encoding="utf-8")
+                self._restore_cached_result(
+                    cache_key=cache_key,
+                    document_result_dir=document_result_dir,
+                    markdown=markdown,
+                    meta_path=meta_path,
+                )
+                return markdown
 
         # 第一步：创建文件解析任务，并获取 MinerU 返回的签名上传 URL
         upload_url, task_id = self._create_file_task(payload)
@@ -174,7 +198,7 @@ class MinerUStandardReader:
         zip_url = self._poll_zip_url(task_id)
 
         # 第四步：下载 zip 结果包，并读取 full.md
-        markdown = self._download_full_md(zip_url, cache_key)
+        markdown = self._download_full_md(zip_url, cache_key, document_result_dir)
 
         # 把 Markdown 结果写入缓存
         cache_path.write_text(markdown, encoding="utf-8")
@@ -209,8 +233,63 @@ class MinerUStandardReader:
             encoding="utf-8",
         )
 
+        # 同步一份便于人工查看的结果到 MinerUResult/<文档名>_<hash>/ 下
+        self._write_result_artifacts(document_result_dir, markdown, meta)
+
         # 返回解析后的 Markdown
         return markdown
+
+    def read_data_dir(
+        self,
+        data_dir: Optional[str] = None,
+        model_version: str = "vlm",
+        language: str = "ch",
+        is_ocr: bool = False,
+        enable_table: bool = True,
+        enable_formula: bool = True,
+        page_ranges: Optional[str] = None,
+        force_reparse: bool = False,
+        confirm_reparse: bool = False,
+    ) -> dict[str, str]:
+        """
+        批量读取项目根目录 data 下的 PDF 文件，并通过 MinerU API 解析。
+
+        每个 PDF 的完整解析结果会分别写入：
+        MinerUResult/<文档名>_<文件hash前12位>/
+        """
+
+        source_dir = Path(data_dir) if data_dir else self.project_root / "data"
+
+        if not source_dir.exists():
+            raise FileNotFoundError(f"data 目录不存在: {source_dir}")
+
+        if not source_dir.is_dir():
+            raise ValueError(f"不是有效目录: {source_dir}")
+
+        pdf_paths = sorted(
+            path
+            for path in source_dir.iterdir()
+            if path.is_file() and path.suffix.lower() == ".pdf"
+        )
+
+        if not pdf_paths:
+            raise FileNotFoundError(f"目录下未找到 PDF 文件: {source_dir}")
+
+        results: dict[str, str] = {}
+        for pdf_path in pdf_paths:
+            results[str(pdf_path)] = self.read_file(
+                file_path=str(pdf_path),
+                model_version=model_version,
+                language=language,
+                is_ocr=is_ocr,
+                enable_table=enable_table,
+                enable_formula=enable_formula,
+                page_ranges=page_ranges,
+                force_reparse=force_reparse,
+                confirm_reparse=confirm_reparse,
+            )
+
+        return results
 
     def _create_file_task(self, payload: dict) -> tuple[str, str]:
         """
@@ -334,7 +413,12 @@ class MinerUStandardReader:
         # 超过最大等待时间则抛出异常
         raise TimeoutError(f"MinerU 解析超时，task_id={task_id}")
 
-    def _download_full_md(self, zip_url: str, cache_key: str) -> str:
+    def _download_full_md(
+        self,
+        zip_url: str,
+        cache_key: str,
+        document_result_dir: Optional[Path] = None,
+    ) -> str:
         """
         下载 MinerU 返回的 zip 文件，并读取其中的 full.md。
         """
@@ -374,7 +458,86 @@ class MinerUStandardReader:
                 raise RuntimeError(f"zip 中未找到 full.md，文件列表: {z.namelist()}")
 
             # 读取 full.md，并按 utf-8 解码成字符串
-            return z.read(md_names[0]).decode("utf-8")
+            markdown = z.read(md_names[0]).decode("utf-8")
+
+        if document_result_dir:
+            self._copy_result_dir(extract_dir, document_result_dir)
+
+        return markdown
+
+    def _restore_cached_result(
+        self,
+        cache_key: str,
+        document_result_dir: Path,
+        markdown: str,
+        meta_path: Path,
+    ) -> None:
+        """
+        缓存命中时，把已缓存的 MinerU 完整结果同步到 MinerUResult。
+        """
+
+        cached_extract_dir = self.cache_dir / cache_key
+
+        if cached_extract_dir.exists():
+            self._copy_result_dir(cached_extract_dir, document_result_dir)
+        else:
+            document_result_dir.mkdir(parents=True, exist_ok=True)
+
+        meta = None
+        if meta_path.exists():
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+
+        self._write_result_artifacts(document_result_dir, markdown, meta)
+
+    @staticmethod
+    def _copy_result_dir(source_dir: Path, target_dir: Path) -> None:
+        """
+        复制 MinerU 解压后的完整结果目录。
+        """
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source_dir, target_dir, dirs_exist_ok=True)
+
+    @staticmethod
+    def _write_result_artifacts(
+        document_result_dir: Path,
+        markdown: str,
+        meta: Optional[dict],
+    ) -> None:
+        """
+        在文档结果目录根部写入常用入口文件，便于直接查看。
+        """
+
+        document_result_dir.mkdir(parents=True, exist_ok=True)
+        (document_result_dir / "full.md").write_text(markdown, encoding="utf-8")
+
+        if meta:
+            (document_result_dir / "mineru_meta.json").write_text(
+                json.dumps(meta, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+    def _make_document_result_dir(self, path: Path, file_hash: str) -> Path:
+        """
+        为每个 PDF 构造独立输出目录，避免同名或多文档结果混在一起。
+        """
+
+        safe_stem = self._safe_path_name(path.stem)
+        return self.result_dir / f"{safe_stem}_{file_hash[:12]}"
+
+    @staticmethod
+    def _safe_path_name(name: str) -> str:
+        """
+        清理 Windows 路径不允许的字符。
+        """
+
+        invalid_chars = '<>:"/\\|?*'
+        safe_name = "".join(
+            "_" if char in invalid_chars or ord(char) < 32 else char
+            for char in name
+        ).strip(" .")
+
+        return safe_name or "document"
 
     @staticmethod
     def _check_response(resp: requests.Response) -> dict:
@@ -438,3 +601,43 @@ class MinerUStandardReader:
 
         # 用 sha256 生成缓存 key
         return hashlib.sha256(data_str.encode("utf-8")).hexdigest()
+
+
+def main() -> None:
+    """
+    允许直接运行当前文件，批量解析项目根目录 data 下的 PDF。
+    """
+
+    project_root = fr()
+    data_dir = project_root / "data"
+    result_dir = project_root / "MinerUResult"
+
+    pdf_paths = sorted(
+        path
+        for path in data_dir.iterdir()
+        if path.is_file() and path.suffix.lower() == ".pdf"
+    ) if data_dir.exists() else []
+
+    if not pdf_paths:
+        raise FileNotFoundError(f"未找到待解析 PDF: {data_dir}")
+
+    print(f"待解析目录: {data_dir}")
+    print(f"输出目录: {result_dir}")
+    print(f"PDF 数量: {len(pdf_paths)}")
+    for path in pdf_paths:
+        print(f"- {path.name}")
+
+    user_input = input("将上传以上 PDF 到 MinerU API 进行解析。输入“确认”继续：").strip()
+    if user_input != "确认":
+        print("已取消解析。")
+        return
+
+    reader = MinerUStandardReader()
+    results = reader.read_data_dir(data_dir=str(data_dir))
+
+    print(f"解析完成，成功解析 {len(results)} 个 PDF。")
+    print(f"结果已保存到: {result_dir}")
+
+
+if __name__ == "__main__":
+    main()

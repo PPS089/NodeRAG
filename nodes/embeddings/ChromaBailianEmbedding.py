@@ -23,7 +23,9 @@ DEFAULT_BAILIAN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_EMBEDDING_MODEL = "text-embedding-v4"
 DEFAULT_BATCH_SIZE = 10
 DEFAULT_TIMEOUT = 60
+DEFAULT_SYNC_MODE = "chunk"
 CHROMA_METADATA_VALUE_TYPES = (str, int, float, bool)
+VALID_SYNC_MODES = {"chunk", "strict", "incremental", "force"}
 
 
 def batched(items: Sequence[Any], batch_size: int) -> Iterable[Sequence[Any]]:
@@ -41,6 +43,11 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 def load_json_file(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def resolve_project_path(path_value: str | Path, project_root: Path) -> Path:
+    path = Path(path_value)
+    return path if path.is_absolute() else project_root / path
 
 
 def find_hybrid_chunk_files(
@@ -132,6 +139,29 @@ def build_chroma_id(chunk: Dict[str, Any]) -> str:
             str(chunk.get("content_hash") or chunk.get("id") or "")[:16],
         ]
     )
+
+
+def get_document_ids(records: Sequence[Tuple[Path, Dict[str, Any]]]) -> List[str]:
+    document_ids = []
+    for _, chunk in records:
+        document_id = str(chunk.get("document_id") or chunk.get("document_name") or "").strip()
+        if document_id:
+            document_ids.append(document_id)
+
+    return sorted(set(document_ids))
+
+
+def get_current_ids_by_document(records: Sequence[Tuple[Path, Dict[str, Any]]]) -> Dict[str, set[str]]:
+    ids_by_document: Dict[str, set[str]] = {}
+
+    for _, chunk in records:
+        document_id = str(chunk.get("document_id") or chunk.get("document_name") or "").strip()
+        if not document_id:
+            continue
+
+        ids_by_document.setdefault(document_id, set()).add(build_chroma_id(chunk))
+
+    return ids_by_document
 
 
 def load_embed_chunks(chunk_files: Sequence[Path]) -> List[Tuple[Path, Dict[str, Any]]]:
@@ -252,14 +282,16 @@ class ChromaBailianIndexer:
         batch_size: Optional[int] = None,
         embedding_client: Optional[BailianEmbeddingClient] = None,
         force_reembed: Optional[bool] = None,
+        sync_mode: Optional[str] = None,
     ) -> None:
         project_root = fr()
         load_dotenv(project_root / ".env")
 
-        self.persist_dir = Path(
+        self.persist_dir = resolve_project_path(
             persist_dir
             or os.getenv("CHROMA_PERSIST_DIR")
-            or project_root / "ChromaDB"
+            or "ChromaDB",
+            project_root,
         )
         self.collection_name = (
             collection_name
@@ -273,6 +305,25 @@ class ChromaBailianIndexer:
             if force_reembed is not None
             else env_bool("CHROMA_FORCE_REEMBED", default=False)
         )
+        self.sync_mode = self.resolve_sync_mode(sync_mode)
+
+    def resolve_sync_mode(self, sync_mode: Optional[str]) -> str:
+        if self.force_reembed:
+            return "force"
+
+        mode = (
+            sync_mode
+            or os.getenv("CHROMA_SYNC_MODE")
+            or DEFAULT_SYNC_MODE
+        ).strip().lower()
+
+        if mode == "chunk_sync":
+            mode = "chunk"
+
+        if mode not in VALID_SYNC_MODES:
+            raise ValueError(f"CHROMA_SYNC_MODE 仅支持 {sorted(VALID_SYNC_MODES)}，当前值: {mode}")
+
+        return mode
 
     def get_collection(self):
         import chromadb
@@ -292,14 +343,57 @@ class ChromaBailianIndexer:
         result = collection.get(ids=list(ids))
         return set(result.get("ids", []))
 
+    @staticmethod
+    def delete_documents(collection, document_ids: Sequence[str]) -> int:
+        deleted_count = 0
+
+        for document_id in document_ids:
+            existing = collection.get(where={"document_id": document_id})
+            existing_ids = existing.get("ids", [])
+            if not existing_ids:
+                continue
+
+            collection.delete(ids=existing_ids)
+            deleted_count += len(existing_ids)
+
+        return deleted_count
+
+    @staticmethod
+    def delete_stale_chunks(collection, current_ids_by_document: Dict[str, set[str]]) -> int:
+        deleted_count = 0
+
+        for document_id, current_ids in current_ids_by_document.items():
+            existing = collection.get(where={"document_id": document_id})
+            existing_ids = set(existing.get("ids", []))
+            stale_ids = sorted(existing_ids - current_ids)
+            if not stale_ids:
+                continue
+
+            collection.delete(ids=stale_ids)
+            deleted_count += len(stale_ids)
+
+        return deleted_count
+
     def upsert_chunks(self, records: Sequence[Tuple[Path, Dict[str, Any]]]) -> Dict[str, Any]:
         collection = self.get_collection()
         upsert_count = 0
         skipped_count = 0
+        deleted_count = 0
+        document_ids = get_document_ids(records)
+        current_ids_by_document = get_current_ids_by_document(records)
+
+        if self.sync_mode in {"strict", "force"}:
+            deleted_count = self.delete_documents(collection, document_ids)
+        elif self.sync_mode == "chunk":
+            deleted_count = self.delete_stale_chunks(collection, current_ids_by_document)
 
         for batch in batched(list(records), self.batch_size):
             ids = [build_chroma_id(chunk) for _, chunk in batch]
-            existing_ids = set() if self.force_reembed else self.get_existing_ids(collection, ids)
+            existing_ids = (
+                self.get_existing_ids(collection, ids)
+                if self.sync_mode in {"chunk", "incremental"}
+                else set()
+            )
             pending_items = [
                 (chroma_id, chunk_file, chunk)
                 for chroma_id, (chunk_file, chunk) in zip(ids, batch)
@@ -329,7 +423,9 @@ class ChromaBailianIndexer:
             "persist_dir": str(self.persist_dir),
             "upsert_count": upsert_count,
             "skipped_existing_count": skipped_count,
-            "force_reembed": self.force_reembed,
+            "deleted_count": deleted_count,
+            "document_count": len(document_ids),
+            "sync_mode": self.sync_mode,
         }
 
 

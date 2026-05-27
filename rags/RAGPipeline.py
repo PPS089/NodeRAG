@@ -5,7 +5,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +26,8 @@ DEFAULT_PER_QUERY_K = 12
 DEFAULT_MAX_CONTEXT_CHARS = 12000
 DEFAULT_MAX_BLOCKS = 12
 EXIT_COMMANDS = {"q", "quit", "exit", "退出", "结束"}
+PipelineContext = Dict[str, Any]
+PipelineStage = Callable[[PipelineContext], PipelineContext]
 
 
 def unique_keep_order(values: Sequence[str]) -> List[str]:
@@ -97,33 +99,77 @@ class RAGPipeline:
         self.skip_preprocess = skip_preprocess
         self.chat_client = OpenAICompatibleChatClient()
 
-    def run(
+    def build_stages(self) -> List[PipelineStage]:
+        return [
+            self.stage_route,
+            self.stage_rewrite,
+            self.stage_pseudo_answer,
+            self.stage_prepare_retrieval,
+            self.stage_retrieve,
+            self.stage_compress,
+            self.stage_prompt,
+            self.stage_answer,
+        ]
+
+    def create_context(
         self,
         question: str,
         document_names: Optional[Sequence[str]] = None,
         chunk_types: Optional[Sequence[str]] = None,
-    ) -> Dict[str, Any]:
-        started_at = time.time()
+    ) -> PipelineContext:
+        return {
+            "question": question,
+            "input_document_names": list(document_names or []),
+            "input_chunk_types": list(chunk_types or []),
+            "started_at": time.time(),
+            "needs_retrieval": True,
+            "stop_pipeline": False,
+            "route_result": None,
+            "rewrite_result": None,
+            "pseudo_answer_result": None,
+            "retrieval_inputs": {},
+            "retrieval_result": None,
+            "context_result": None,
+            "prompt_result": None,
+            "answer": None,
+        }
 
-        route_result = None
-        rewrite_result = None
-        pseudo_answer_result = None
+    def stage_route(self, context: PipelineContext) -> PipelineContext:
+        if self.skip_preprocess:
+            return context
 
-        if not self.skip_preprocess:
-            route_result = route_intent(question)
-            if route_result.get("needs_retrieval") is False:
-                answer = build_direct_answer(question, temperature=self.temperature)
-                return {
-                    "question": question,
-                    "answer": answer,
-                    "route": route_result,
-                    "needs_retrieval": False,
-                    "elapsed_seconds": round(time.time() - started_at, 3),
-                }
+        question = context["question"]
+        route_result = route_intent(question)
+        context["route_result"] = route_result
 
-            rewrite_result = rewrite_question(question)
-            pseudo_answer_result = generate_pseudo_answer(question)
+        if route_result.get("needs_retrieval") is False:
+            context["answer"] = build_direct_answer(question, temperature=self.temperature)
+            context["needs_retrieval"] = False
+            context["stop_pipeline"] = True
 
+        return context
+
+    def stage_rewrite(self, context: PipelineContext) -> PipelineContext:
+        if self.skip_preprocess or context.get("stop_pipeline"):
+            return context
+
+        context["rewrite_result"] = rewrite_question(context["question"])
+        return context
+
+    def stage_pseudo_answer(self, context: PipelineContext) -> PipelineContext:
+        if self.skip_preprocess or context.get("stop_pipeline"):
+            return context
+
+        context["pseudo_answer_result"] = generate_pseudo_answer(context["question"])
+        return context
+
+    def stage_prepare_retrieval(self, context: PipelineContext) -> PipelineContext:
+        if context.get("stop_pipeline"):
+            return context
+
+        route_result = context.get("route_result")
+        rewrite_result = context.get("rewrite_result")
+        pseudo_answer_result = context.get("pseudo_answer_result")
         search_queries = []
         keyword_queries = []
         pseudo_answer_text = None
@@ -138,47 +184,95 @@ class RAGPipeline:
             pseudo_answer_text = str(pseudo_answer_result.get("pseudo_answer") or "").strip() or None
 
         final_document_names = unique_keep_order(
-            list(document_names or []) + extract_route_document_names(route_result)
+            list(context.get("input_document_names") or []) + extract_route_document_names(route_result)
         )
         final_chunk_types = unique_keep_order(
-            list(chunk_types or []) + extract_route_chunk_types(route_result)
+            list(context.get("input_chunk_types") or []) + extract_route_chunk_types(route_result)
         )
 
-        retrieval_result = retrieve(
-            question=question,
-            queries=search_queries,
-            keyword_queries=keyword_queries,
-            pseudo_answer=pseudo_answer_text,
-            document_names=final_document_names,
-            chunk_types=final_chunk_types,
+        context["retrieval_inputs"] = {
+            "search_queries": search_queries,
+            "keyword_queries": keyword_queries,
+            "pseudo_answer_text": pseudo_answer_text,
+            "document_names": final_document_names,
+            "chunk_types": final_chunk_types,
+        }
+        return context
+
+    def stage_retrieve(self, context: PipelineContext) -> PipelineContext:
+        if context.get("stop_pipeline"):
+            return context
+
+        retrieval_inputs = context.get("retrieval_inputs") or {}
+        context["retrieval_result"] = retrieve(
+            question=context["question"],
+            queries=retrieval_inputs.get("search_queries") or [],
+            keyword_queries=retrieval_inputs.get("keyword_queries") or [],
+            pseudo_answer=retrieval_inputs.get("pseudo_answer_text"),
+            document_names=retrieval_inputs.get("document_names") or [],
+            chunk_types=retrieval_inputs.get("chunk_types") or [],
             per_query_k=self.per_query_k,
             top_k=self.top_k,
             expand_context=True,
         )
-        context_result = compress_context(
-            retrieval_result=retrieval_result,
+        return context
+
+    def stage_compress(self, context: PipelineContext) -> PipelineContext:
+        if context.get("stop_pipeline"):
+            return context
+
+        context["context_result"] = compress_context(
+            retrieval_result=context["retrieval_result"],
             max_context_chars=self.max_context_chars,
             max_blocks=self.max_blocks,
         )
-        prompt_result = build_prompt(
-            question=question,
-            context_result=context_result,
-            route_result=route_result,
-            rewrite_result=rewrite_result,
-            pseudo_answer_result=pseudo_answer_result,
+        return context
+
+    def stage_prompt(self, context: PipelineContext) -> PipelineContext:
+        if context.get("stop_pipeline"):
+            return context
+
+        context["prompt_result"] = build_prompt(
+            question=context["question"],
+            context_result=context["context_result"],
+            route_result=context.get("route_result"),
+            rewrite_result=context.get("rewrite_result"),
+            pseudo_answer_result=context.get("pseudo_answer_result"),
         )
-        answer = self.chat_client.chat_messages(
-            messages=prompt_result["messages"],
+        return context
+
+    def stage_answer(self, context: PipelineContext) -> PipelineContext:
+        if context.get("stop_pipeline"):
+            return context
+
+        context["answer"] = self.chat_client.chat_messages(
+            messages=context["prompt_result"]["messages"],
             temperature=self.temperature,
         )
+        return context
+
+    def build_result(self, context: PipelineContext) -> Dict[str, Any]:
+        elapsed_seconds = round(time.time() - context["started_at"], 3)
+
+        if context.get("needs_retrieval") is False:
+            return {
+                "question": context["question"],
+                "answer": context.get("answer", ""),
+                "route": context.get("route_result"),
+                "needs_retrieval": False,
+                "elapsed_seconds": elapsed_seconds,
+            }
+
+        retrieval_result = context.get("retrieval_result") or {}
+        prompt_result = context.get("prompt_result") or {}
 
         return {
-            "question": question,
-            "answer": answer,
+            "question": context["question"],
+            "answer": context.get("answer", ""),
             "citations": prompt_result.get("citations", []),
-            "route": route_result,
-            "rewrite": rewrite_result,
-            "pseudo_answer": pseudo_answer_result,
+            "route": context.get("route_result"),
+            "rewrite": context.get("rewrite_result"),
+            "pseudo_answer": context.get("pseudo_answer_result"),
             "retrieval": {
                 "hit_count": retrieval_result.get("hit_count"),
                 "candidate_count": retrieval_result.get("candidate_count"),
@@ -188,8 +282,27 @@ class RAGPipeline:
             },
             "context_stats": prompt_result.get("context_stats", {}),
             "needs_retrieval": True,
-            "elapsed_seconds": round(time.time() - started_at, 3),
+            "elapsed_seconds": elapsed_seconds,
         }
+
+    def run(
+        self,
+        question: str,
+        document_names: Optional[Sequence[str]] = None,
+        chunk_types: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Any]:
+        context = self.create_context(
+            question=question,
+            document_names=document_names,
+            chunk_types=chunk_types,
+        )
+
+        for stage in self.build_stages():
+            context = stage(context)
+            if context.get("stop_pipeline"):
+                break
+
+        return self.build_result(context)
 
 
 def print_answer(result: Dict[str, Any], show_trace: bool = False) -> None:

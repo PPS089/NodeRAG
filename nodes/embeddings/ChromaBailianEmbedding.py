@@ -14,6 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from nodes.contracts import validate_hybrid_chunk  # noqa: E402
 from utils.FindProjectRoot import find_project_root as fr  # noqa: E402
 
 
@@ -178,6 +179,7 @@ def load_embed_chunks(chunk_files: Sequence[Path]) -> List[Tuple[Path, Dict[str,
 
         for chunk in chunks:
             if chunk.get("should_embed") is True:
+                validate_hybrid_chunk(chunk, source=str(chunk_file))
                 embedding_text = str(chunk.get("embedding_text", "")).strip()
                 if embedding_text:
                     records.append((chunk_file, chunk))

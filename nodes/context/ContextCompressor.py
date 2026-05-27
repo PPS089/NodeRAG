@@ -7,6 +7,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from nodes.contracts import validate_retrieval_result  # noqa: E402
+
+
 DEFAULT_MAX_CONTEXT_CHARS = 12000
 DEFAULT_MAX_BLOCK_CHARS = 1800
 DEFAULT_MAX_BLOCKS = 12
@@ -126,6 +133,8 @@ def compress_context(
     max_block_chars: int = DEFAULT_MAX_BLOCK_CHARS,
     max_blocks: int = DEFAULT_MAX_BLOCKS,
 ) -> Dict[str, Any]:
+    validate_retrieval_result(retrieval_result)
+
     candidates = collect_context_candidates(retrieval_result)
     candidates.sort(key=lambda item: item["score"], reverse=True)
 

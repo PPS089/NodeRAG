@@ -7,6 +7,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from nodes.contracts import validate_compressed_context, validate_prompt_payload  # noqa: E402
+
+
 SYSTEM_PROMPT = """
 你是企业知识库 RAG 问答助手。
 
@@ -93,6 +100,8 @@ def build_prompt(
     rewrite_result: Optional[Dict[str, Any]] = None,
     pseudo_answer_result: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    validate_compressed_context(context_result)
+
     context_text = build_context_text(context_result)
     auxiliary_text = build_auxiliary_text(route_result, rewrite_result, pseudo_answer_result)
 
@@ -115,12 +124,14 @@ def build_prompt(
         {"role": "user", "content": "\n\n".join(user_parts)},
     ]
 
-    return {
+    result = {
         "question": question,
         "messages": messages,
         "citations": context_result.get("citations", []),
         "context_stats": context_result.get("compression_stats", {}),
     }
+    validate_prompt_payload(result)
+    return result
 
 
 def parse_args() -> argparse.Namespace:

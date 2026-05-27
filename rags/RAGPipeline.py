@@ -19,6 +19,13 @@ from nodes.query.LLMClient import OpenAICompatibleChatClient  # noqa: E402
 from nodes.query.PseudoAnswer import generate_pseudo_answer  # noqa: E402
 from nodes.query.QuestionRewriter import rewrite_question  # noqa: E402
 from nodes.retrieval.ChromaRetriever import retrieve  # noqa: E402
+from nodes.auth.PermissionGuard import (  # noqa: E402
+    DEFAULT_CONFIG_PATH as DEFAULT_PERMISSION_CONFIG_PATH,
+    DEFAULT_PERMISSION_LEVEL,
+    apply_permission_to_retrieval_inputs,
+    build_permission_context,
+    filter_retrieval_result_by_permission,
+)
 
 
 DEFAULT_TOP_K = 8
@@ -90,6 +97,8 @@ class RAGPipeline:
         max_blocks: int = DEFAULT_MAX_BLOCKS,
         temperature: float = 0.2,
         skip_preprocess: bool = False,
+        permission_level: str = DEFAULT_PERMISSION_LEVEL,
+        permission_config: str | Path = DEFAULT_PERMISSION_CONFIG_PATH,
     ) -> None:
         self.top_k = top_k
         self.per_query_k = per_query_k
@@ -97,6 +106,7 @@ class RAGPipeline:
         self.max_blocks = max_blocks
         self.temperature = temperature
         self.skip_preprocess = skip_preprocess
+        self.permission_context = build_permission_context(permission_level, permission_config)
         self.chat_client = OpenAICompatibleChatClient()
 
     def build_stages(self) -> List[PipelineStage]:
@@ -105,7 +115,9 @@ class RAGPipeline:
             self.stage_rewrite,
             self.stage_pseudo_answer,
             self.stage_prepare_retrieval,
+            self.stage_apply_permission,
             self.stage_retrieve,
+            self.stage_filter_retrieval_permission,
             self.stage_compress,
             self.stage_prompt,
             self.stage_answer,
@@ -132,6 +144,8 @@ class RAGPipeline:
             "context_result": None,
             "prompt_result": None,
             "answer": None,
+            "permission_context": self.permission_context,
+            "permission_denied": False,
         }
 
     def stage_route(self, context: PipelineContext) -> PipelineContext:
@@ -199,6 +213,27 @@ class RAGPipeline:
         }
         return context
 
+    def stage_apply_permission(self, context: PipelineContext) -> PipelineContext:
+        if context.get("stop_pipeline"):
+            return context
+
+        retrieval_inputs = apply_permission_to_retrieval_inputs(
+            context.get("retrieval_inputs") or {},
+            self.permission_context,
+        )
+        context["retrieval_inputs"] = retrieval_inputs
+
+        if retrieval_inputs.get("permission_denied"):
+            denied_names = retrieval_inputs.get("denied_document_names") or []
+            context["permission_denied"] = True
+            context["answer"] = (
+                f"当前模拟权限等级 {self.permission_context['permission_level']} "
+                f"无权访问请求的知识库或文档：{', '.join(denied_names)}。"
+            )
+            context["stop_pipeline"] = True
+
+        return context
+
     def stage_retrieve(self, context: PipelineContext) -> PipelineContext:
         if context.get("stop_pipeline"):
             return context
@@ -214,6 +249,16 @@ class RAGPipeline:
             per_query_k=self.per_query_k,
             top_k=self.top_k,
             expand_context=True,
+        )
+        return context
+
+    def stage_filter_retrieval_permission(self, context: PipelineContext) -> PipelineContext:
+        if context.get("stop_pipeline"):
+            return context
+
+        context["retrieval_result"] = filter_retrieval_result_by_permission(
+            context["retrieval_result"],
+            self.permission_context,
         )
         return context
 
@@ -253,12 +298,30 @@ class RAGPipeline:
 
     def build_result(self, context: PipelineContext) -> Dict[str, Any]:
         elapsed_seconds = round(time.time() - context["started_at"], 3)
+        permission_summary = {
+            "permission_level": self.permission_context.get("permission_level"),
+            "allowed_permission_codes": self.permission_context.get("allowed_permission_codes", []),
+            "allowed_knowledge_bases": self.permission_context.get("allowed_knowledge_bases", []),
+            "denied_knowledge_bases": self.permission_context.get("denied_knowledge_bases", []),
+        }
+
+        if context.get("permission_denied"):
+            return {
+                "question": context["question"],
+                "answer": context.get("answer", ""),
+                "route": context.get("route_result"),
+                "permission": permission_summary,
+                "permission_denied": True,
+                "needs_retrieval": True,
+                "elapsed_seconds": elapsed_seconds,
+            }
 
         if context.get("needs_retrieval") is False:
             return {
                 "question": context["question"],
                 "answer": context.get("answer", ""),
                 "route": context.get("route_result"),
+                "permission": permission_summary,
                 "needs_retrieval": False,
                 "elapsed_seconds": elapsed_seconds,
             }
@@ -273,12 +336,14 @@ class RAGPipeline:
             "route": context.get("route_result"),
             "rewrite": context.get("rewrite_result"),
             "pseudo_answer": context.get("pseudo_answer_result"),
+            "permission": permission_summary,
             "retrieval": {
                 "hit_count": retrieval_result.get("hit_count"),
                 "candidate_count": retrieval_result.get("candidate_count"),
                 "where_filter": retrieval_result.get("where_filter"),
                 "queries": retrieval_result.get("queries"),
                 "keyword_queries": retrieval_result.get("keyword_queries"),
+                "permission": retrieval_result.get("permission", {}),
             },
             "context_stats": prompt_result.get("context_stats", {}),
             "needs_retrieval": True,
@@ -332,7 +397,19 @@ def save_trace(result: Dict[str, Any], trace_dir: str | Path) -> Path:
     return file_path
 
 
+def resolve_permission_level(args: argparse.Namespace, interactive: bool = False) -> str:
+    if args.permission_level:
+        return args.permission_level
+
+    if not interactive:
+        return DEFAULT_PERMISSION_LEVEL
+
+    selected = input("请选择模拟权限等级 L1/L2/L3/L4/L5，直接回车默认 L1> ").strip().upper()
+    return selected or DEFAULT_PERMISSION_LEVEL
+
+
 def run_interactive(args: argparse.Namespace) -> None:
+    permission_level = resolve_permission_level(args, interactive=True)
     pipeline = RAGPipeline(
         top_k=args.top_k,
         per_query_k=args.per_query_k,
@@ -340,8 +417,13 @@ def run_interactive(args: argparse.Namespace) -> None:
         max_blocks=args.max_blocks,
         temperature=args.temperature,
         skip_preprocess=args.skip_preprocess,
+        permission_level=permission_level,
+        permission_config=args.permission_config,
     )
 
+    allowed_names = "、".join(pipeline.permission_context.get("allowed_knowledge_bases", []))
+    print(f"当前模拟权限等级: {pipeline.permission_context['permission_level']}")
+    print(f"可访问知识库: {allowed_names or '无'}")
     print("进入 RAG 循环模式。输入 q / quit / exit / 退出 结束。")
     while True:
         question = input("\n问题> ").strip()
@@ -373,6 +455,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-blocks", type=int, default=DEFAULT_MAX_BLOCKS)
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--skip-preprocess", action="store_true", help="跳过路由/改写/伪答案，直接检索原问题。")
+    parser.add_argument("--permission-level", choices=["L1", "L2", "L3", "L4", "L5"], help="模拟用户权限等级。")
+    parser.add_argument("--permission-config", default=str(DEFAULT_PERMISSION_CONFIG_PATH), help="知识库权限配置 JSON 路径。")
     parser.add_argument("--show-trace", action="store_true", help="打印完整链路 JSON。")
     parser.add_argument("--trace-dir", help="保存每轮完整链路 JSON 的目录。")
     parser.add_argument("--output", "-o", help="单次问题时输出 JSON 文件。")
@@ -398,6 +482,8 @@ def main() -> Optional[Dict[str, Any]]:
         max_blocks=args.max_blocks,
         temperature=args.temperature,
         skip_preprocess=args.skip_preprocess,
+        permission_level=resolve_permission_level(args),
+        permission_config=args.permission_config,
     )
     result = pipeline.run(
         question=question,

@@ -4,6 +4,9 @@ from utils.FindProjectRoot import find_project_root as fr
 
 
 CODE_BLOCK_RE = re.compile(r"(```.*?```|~~~.*?~~~)", flags=re.S)
+HTML_TABLE_RE = re.compile(r"(<table\b.*?</table>)", flags=re.S | re.I)
+ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\ufeff]")
+CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 def clean_markdown(text: str) -> str:
@@ -24,8 +27,14 @@ def clean_markdown(text: str) -> str:
     # 统一换行符
     text = text.replace("\r\n", "\n").replace("\r", "\n")
 
+    # 清理 OCR/PDF 常见不可见字符
+    text = normalize_invisible_chars(text)
+
     # 保护代码块，避免后续规则误处理代码内容
     text, code_blocks = protect_code_blocks(text)
+
+    # 保护 HTML 表格，避免清洗标签时破坏下游表格分片
+    text, html_tables = protect_html_tables(text)
 
     # 删除目录
     text = remove_toc(text)
@@ -42,6 +51,9 @@ def clean_markdown(text: str) -> str:
     # 删除无意义分隔线
     text = remove_redundant_separators(text)
 
+    # 删除保守可识别的页码/页脚噪声
+    text = remove_page_noise(text)
+
     # 删除空表格行
     text = remove_empty_table_rows(text)
 
@@ -56,6 +68,10 @@ def clean_markdown(text: str) -> str:
 
         # 跳过连续重复空行
         if stripped == "" and previous_line == "":
+            continue
+
+        # 跳过清洗后仍明显无意义的行
+        if is_noise_line(stripped):
             continue
 
         # 规范标题：###标题 -> ### 标题
@@ -91,6 +107,9 @@ def clean_markdown(text: str) -> str:
     # 压缩过多空行
     text = re.sub(r"\n{3,}", "\n\n", text)
 
+    # 恢复 HTML 表格
+    text = restore_html_tables(text, html_tables)
+
     # 恢复代码块
     text = restore_code_blocks(text, code_blocks)
 
@@ -101,6 +120,17 @@ def clean_markdown(text: str) -> str:
     # 文档结尾保留一个换行
     text = text.strip() + "\n"
 
+    return text
+
+
+def normalize_invisible_chars(text: str) -> str:
+    """
+    清理 MinerU/OCR 结果中常见的不可见字符和异常空白。
+    """
+
+    text = ZERO_WIDTH_RE.sub("", text)
+    text = CONTROL_CHAR_RE.sub("", text)
+    text = text.replace("\u00a0", " ").replace("\u3000", " ")
     return text
 
 
@@ -132,6 +162,47 @@ def restore_code_blocks(text: str, code_blocks: list[str]) -> str:
         text = text.replace(f"__CODE_BLOCK_{index}__", code_block)
 
     return text
+
+
+def protect_html_tables(text: str) -> tuple[str, list[str]]:
+    """
+    保护 HTML 表格。
+
+    MarkDownChunk 后续会识别 <table>，因此清洗阶段只保护结构，不转换格式。
+    """
+
+    html_tables = []
+
+    def replacer(match):
+        placeholder = f"__HTML_TABLE_{len(html_tables)}__"
+        html_tables.append(match.group())
+        return placeholder
+
+    protected_text = HTML_TABLE_RE.sub(replacer, text)
+
+    return protected_text, html_tables
+
+
+def restore_html_tables(text: str, html_tables: list[str]) -> str:
+    """
+    恢复 HTML 表格。
+    """
+
+    for index, html_table in enumerate(html_tables):
+        text = text.replace(f"__HTML_TABLE_{index}__", normalize_html_table(html_table))
+
+    return text
+
+
+def normalize_html_table(html_table: str) -> str:
+    """
+    对 HTML 表格做轻量规范化，保留标签结构。
+    """
+
+    html_table = html_table.replace("\n", "")
+    html_table = re.sub(r">\s+<", "><", html_table)
+    html_table = re.sub(r"[ \t]{2,}", " ", html_table)
+    return html_table.strip()
 
 
 def remove_front_matter(text: str) -> str:
@@ -174,6 +245,44 @@ def remove_redundant_separators(text: str) -> str:
     return re.sub(r"(?m)^\s*([-*_])\s*(\1\s*){2,}$", "", text)
 
 
+def remove_page_noise(text: str) -> str:
+    """
+    删除保守可识别的 PDF 页码/页脚噪声。
+
+    只处理独占一行的页码形态，避免误删正文编号。
+    """
+
+    lines = text.split("\n")
+    cleaned_lines = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        if is_page_number_line(stripped):
+            continue
+
+        cleaned_lines.append(line)
+
+    return "\n".join(cleaned_lines)
+
+
+def is_page_number_line(line: str) -> bool:
+    """
+    判断是否是独占一行的页码。
+    """
+
+    if re.match(r"^[-–—]?\s*\d{1,4}\s*[-–—]?$", line):
+        return True
+
+    if re.match(r"^(第\s*)?\d{1,4}\s*(页|/\s*\d{1,4}|of\s+\d{1,4})$", line, re.I):
+        return True
+
+    if re.match(r"^Page\s+\d{1,4}(\s*/\s*\d{1,4})?$", line, re.I):
+        return True
+
+    return False
+
+
 def remove_empty_table_rows(text: str) -> str:
     """
     删除明显空表格行
@@ -192,6 +301,23 @@ def remove_empty_table_rows(text: str) -> str:
         cleaned_lines.append(line)
 
     return "\n".join(cleaned_lines)
+
+
+def is_noise_line(line: str) -> bool:
+    """
+    判断清洗后仍明显无意义的行。
+    """
+
+    if not line:
+        return False
+
+    if re.fullmatch(r"[·•\-\s]{3,}", line):
+        return True
+
+    if re.fullmatch(r"[.。·•]{4,}", line):
+        return True
+
+    return False
 
 
 def normalize_heading(line: str) -> str:
@@ -239,6 +365,9 @@ def should_compress_spaces(line: str) -> bool:
         return False
 
     if line.startswith("__CODE_BLOCK_"):
+        return False
+
+    if line.startswith("__HTML_TABLE_"):
         return False
 
     if line.startswith(" "):
@@ -352,21 +481,64 @@ def clean_md_file(input_path: str | Path, output_path: str | Path | None = None)
     return output_file
 
 
-if __name__ == "__main__":
-    # 获取项目根目录
-    path = fr()
+def find_mineru_full_md_files(result_dir: str | Path | None = None) -> list[Path]:
+    """
+    查找 MinerUResult 下每个文档目录中的 full.md。
+    """
 
-    # 待处理文档
-    input_md = (
+    project_root = fr()
+    mineru_result_dir = Path(result_dir) if result_dir else project_root / "MinerUResult"
+
+    if not mineru_result_dir.exists():
+        raise FileNotFoundError(f"MinerUResult 目录不存在: {mineru_result_dir}")
+
+    if not mineru_result_dir.is_dir():
+        raise ValueError(f"不是有效目录: {mineru_result_dir}")
+
+    return sorted(
         path
-        / ".mineru_cache"
-        / "5ac5a6c3b1da4f87b1045865a51cbcf4e73faad43f5873e6676946902f981f64"
-        / "full.md"
+        for path in mineru_result_dir.glob("*/full.md")
+        if path.is_file()
     )
 
-    # 已处理文档：必须放在 full.md 同目录
-    output_md = input_md.with_name("DataCleaned.md")
 
-    result = clean_md_file(input_md, output_md)
+def clean_mineru_result_dir(
+    result_dir: str | Path | None = None,
+    output_name: str = "DataCleaned.md",
+) -> list[Path]:
+    """
+    批量清洗 MinerUResult 下所有文档目录中的 full.md。
 
-    print(f"清洗完成，输出文件: {result}")
+    输出默认写回每个文档目录的 DataCleaned.md。
+    """
+
+    full_md_files = find_mineru_full_md_files(result_dir)
+
+    if not full_md_files:
+        target_dir = Path(result_dir) if result_dir else fr() / "MinerUResult"
+        raise FileNotFoundError(f"未找到 MinerU 解析结果 full.md: {target_dir}")
+
+    output_files = []
+    for input_md in full_md_files:
+        output_md = input_md.with_name(output_name)
+        output_files.append(clean_md_file(input_md, output_md))
+
+    return output_files
+
+
+def main() -> list[Path]:
+    """
+    允许直接运行当前文件，从 MinerUResult 批量读取并清洗。
+    """
+
+    output_files = clean_mineru_result_dir()
+
+    print(f"清洗完成，共输出 {len(output_files)} 个文件:")
+    for output_file in output_files:
+        print(f"- {output_file}")
+
+    return output_files
+
+
+if __name__ == "__main__":
+    main()

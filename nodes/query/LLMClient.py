@@ -91,6 +91,43 @@ class OpenAICompatibleChatClient:
         content = result["choices"][0]["message"]["content"]
         return parse_json_object(content)
 
+    def chat_messages(
+        self,
+        messages: Sequence[Dict[str, str]],
+        temperature: float = 0.2,
+    ) -> str:
+        payload = {
+            "model": self.model,
+            "messages": list(messages),
+            "temperature": temperature,
+        }
+        response = requests.post(
+            self.chat_completions_url,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        result = response.json()
+        return result["choices"][0]["message"]["content"]
+
+    def chat_text(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.2,
+    ) -> str:
+        return self.chat_messages(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=temperature,
+        )
+
 
 def parse_json_object(text: str) -> Dict[str, Any]:
     try:

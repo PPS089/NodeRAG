@@ -1,0 +1,111 @@
+{
+  "default_access": "deny",
+  "levels": {
+    "L1": 1,
+    "L2": 2,
+    "L3": 3,
+    "L4": 4,
+    "L5": 5
+  },
+  "knowledge_bases": [
+    {
+      "knowledge_base": "公司公开制度库",
+      "required_level": "L1",
+      "permission_code": "KB.PUBLIC.READ",
+      "document_names": [
+        "公司公开制度库",
+        "公司公开制度库.pdf"
+      ],
+      "document_patterns": [
+        "*公司公开制度库*"
+      ]
+    },
+    {
+      "knowledge_base": "HR 基础制度库",
+      "required_level": "L2",
+      "permission_code": "KB.HR.BASIC.READ",
+      "document_names": [
+        "HR 基础制度库",
+        "HR 基础制度库.pdf"
+      ],
+      "document_patterns": [
+        "*HR 基础制度库*",
+        "*HR基础制度库*"
+      ]
+    },
+    {
+      "knowledge_base": "HR 薪酬制度库",
+      "required_level": "L4",
+      "permission_code": "KB.HR.SALARY.READ",
+      "document_names": [
+        "HR 薪酬制度库",
+        "HR 薪酬制度库.pdf"
+      ],
+      "document_patterns": [
+        "*HR 薪酬制度库*",
+        "*HR薪酬制度库*"
+      ]
+    },
+    {
+      "knowledge_base": "销售产品资料库",
+      "required_level": "L2",
+      "permission_code": "KB.SALES.PRODUCT.READ",
+      "document_names": [
+        "销售产品资料库",
+        "销售产品资料库.pdf"
+      ],
+      "document_patterns": [
+        "*销售产品资料库*"
+      ]
+    },
+    {
+      "knowledge_base": "销售价格策略库",
+      "required_level": "L4",
+      "permission_code": "KB.SALES.PRICE.READ",
+      "document_names": [
+        "销售价格策略库",
+        "销售价格策略库.pdf"
+      ],
+      "document_patterns": [
+        "*销售价格策略库*"
+      ]
+    },
+    {
+      "knowledge_base": "法务合同模板库",
+      "required_level": "L3",
+      "permission_code": "KB.LEGAL.CONTRACT.READ",
+      "document_names": [
+        "法务合同模板库",
+        "法务合同模板库.pdf"
+      ],
+      "document_patterns": [
+        "*法务合同模板库*"
+      ]
+    },
+    {
+      "knowledge_base": "财务预算知识库",
+      "required_level": "L5",
+      "permission_code": "KB.FINANCE.BUDGET.READ",
+      "document_names": [
+        "财务预算知识库",
+        "财务预算知识库.pdf"
+      ],
+      "document_patterns": [
+        "*财务预算知识库*"
+      ]
+    },
+    {
+      "knowledge_base": "项目 A 知识库",
+      "required_level": "L3",
+      "permission_code": "KB.PROJECT.A.READ",
+      "document_names": [
+        "项目 A 知识库",
+        "项目 A 知识库.pdf"
+      ],
+      "document_patterns": [
+        "*项目 A 知识库*",
+        "*项目A知识库*"
+      ]
+    }
+  ]
+}

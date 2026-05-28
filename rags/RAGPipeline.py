@@ -40,6 +40,7 @@ DEFAULT_PER_QUERY_K = 12
 DEFAULT_MAX_CONTEXT_CHARS = 12000
 DEFAULT_MAX_BLOCKS = 12
 EXIT_COMMANDS = {"q", "quit", "exit", "退出", "结束"}
+PIPELINE_MODES = {"standard", "fast"}
 PipelineContext = Dict[str, Any]
 PipelineStage = Callable[[PipelineContext], PipelineContext]
 
@@ -104,6 +105,7 @@ class RAGPipeline:
         max_blocks: int = DEFAULT_MAX_BLOCKS,
         temperature: float = 0.2,
         skip_preprocess: bool = False,
+        pipeline_mode: str = "standard",
         permission_level: str = DEFAULT_PERMISSION_LEVEL,
         permission_config: str | Path = DEFAULT_PERMISSION_CONFIG_PATH,
         rerank_config: str | Path = DEFAULT_RERANK_CONFIG_PATH,
@@ -117,7 +119,8 @@ class RAGPipeline:
         self.max_context_chars = max_context_chars
         self.max_blocks = max_blocks
         self.temperature = temperature
-        self.skip_preprocess = skip_preprocess
+        self.pipeline_mode = self.resolve_pipeline_mode(pipeline_mode, skip_preprocess)
+        self.skip_preprocess = self.pipeline_mode == "fast"
         self.rerank_config_path = rerank_config
         self.rerank_config = load_rerank_config(rerank_config)
         self.rerank_top_n = int(rerank_top_n if rerank_top_n is not None else self.rerank_config.get("rerank_top_n", DEFAULT_RERANK_TOP_N))
@@ -125,6 +128,16 @@ class RAGPipeline:
         self.permission_context = build_permission_context(permission_level, permission_config)
         self.logger = RAGLogger(log_file=log_file, enabled=log_enabled)
         self.chat_client = OpenAICompatibleChatClient()
+
+    @staticmethod
+    def resolve_pipeline_mode(pipeline_mode: str, skip_preprocess: bool = False) -> str:
+        if skip_preprocess:
+            return "fast"
+
+        mode = str(pipeline_mode or "standard").strip().lower()
+        if mode not in PIPELINE_MODES:
+            raise ValueError(f"pipeline_mode 仅支持 {sorted(PIPELINE_MODES)}，当前值: {pipeline_mode}")
+        return mode
 
     def build_stages(self) -> List[PipelineStage]:
         return [
@@ -149,6 +162,7 @@ class RAGPipeline:
     ) -> PipelineContext:
         return {
             "trace_id": new_trace_id(),
+            "pipeline_mode": self.pipeline_mode,
             "question": question,
             "input_document_names": list(document_names or []),
             "input_chunk_types": list(chunk_types or []),
@@ -175,6 +189,7 @@ class RAGPipeline:
         prompt_result = context.get("prompt_result") or {}
 
         return {
+            "pipeline_mode": self.pipeline_mode,
             "permission_level": self.permission_context.get("permission_level"),
             "stop_pipeline": bool(context.get("stop_pipeline")),
             "needs_retrieval": bool(context.get("needs_retrieval")),
@@ -220,7 +235,7 @@ class RAGPipeline:
         return next_context
 
     def stage_route(self, context: PipelineContext) -> PipelineContext:
-        if self.skip_preprocess:
+        if self.pipeline_mode == "fast":
             return context
 
         question = context["question"]
@@ -235,14 +250,14 @@ class RAGPipeline:
         return context
 
     def stage_rewrite(self, context: PipelineContext) -> PipelineContext:
-        if self.skip_preprocess or context.get("stop_pipeline"):
+        if self.pipeline_mode == "fast" or context.get("stop_pipeline"):
             return context
 
         context["rewrite_result"] = rewrite_question(context["question"])
         return context
 
     def stage_pseudo_answer(self, context: PipelineContext) -> PipelineContext:
-        if self.skip_preprocess or context.get("stop_pipeline"):
+        if self.pipeline_mode == "fast" or context.get("stop_pipeline"):
             return context
 
         context["pseudo_answer_result"] = generate_pseudo_answer(context["question"])
@@ -403,6 +418,7 @@ class RAGPipeline:
         if context.get("permission_denied"):
             return {
                 "trace_id": context["trace_id"],
+                "pipeline_mode": context.get("pipeline_mode", self.pipeline_mode),
                 "question": context["question"],
                 "answer": context.get("answer", ""),
                 "route": context.get("route_result"),
@@ -415,6 +431,7 @@ class RAGPipeline:
         if context.get("needs_retrieval") is False:
             return {
                 "trace_id": context["trace_id"],
+                "pipeline_mode": context.get("pipeline_mode", self.pipeline_mode),
                 "question": context["question"],
                 "answer": context.get("answer", ""),
                 "route": context.get("route_result"),
@@ -428,6 +445,7 @@ class RAGPipeline:
 
         return {
             "trace_id": context["trace_id"],
+            "pipeline_mode": context.get("pipeline_mode", self.pipeline_mode),
             "question": context["question"],
             "answer": context.get("answer", ""),
             "citations": prompt_result.get("citations", []),
@@ -463,6 +481,7 @@ class RAGPipeline:
         self.logger.log(
             event="pipeline_start",
             trace_id=context["trace_id"],
+            pipeline_mode=self.pipeline_mode,
             question_length=len(question),
             permission_level=self.permission_context.get("permission_level"),
         )
@@ -541,6 +560,7 @@ def run_interactive(args: argparse.Namespace) -> None:
         max_blocks=args.max_blocks,
         temperature=args.temperature,
         skip_preprocess=args.skip_preprocess,
+        pipeline_mode=resolve_pipeline_mode_arg(args),
         permission_level=permission_level,
         permission_config=args.permission_config,
         rerank_config=args.rerank_config,
@@ -552,6 +572,7 @@ def run_interactive(args: argparse.Namespace) -> None:
 
     allowed_names = "、".join(pipeline.permission_context.get("allowed_knowledge_bases", []))
     print(f"当前模拟权限等级: {pipeline.permission_context['permission_level']}")
+    print(f"当前 RAG 模式: {pipeline.pipeline_mode}")
     print(f"可访问知识库: {allowed_names or '无'}")
     print("进入 RAG 循环模式。输入 q / quit / exit / 退出 结束。")
     while True:
@@ -583,7 +604,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-context-chars", type=int, default=DEFAULT_MAX_CONTEXT_CHARS)
     parser.add_argument("--max-blocks", type=int, default=DEFAULT_MAX_BLOCKS)
     parser.add_argument("--temperature", type=float, default=0.2)
-    parser.add_argument("--skip-preprocess", action="store_true", help="跳过路由/改写/伪答案，直接检索原问题。")
+    parser.add_argument("--mode", choices=sorted(PIPELINE_MODES), default="standard", help="RAG 模式：standard=完整前处理，fast=只用原问题检索。")
+    parser.add_argument("--fast", action="store_true", help="快捷启用 fast 模式，只用原问题检索。")
+    parser.add_argument("--skip-preprocess", action="store_true", help="兼容旧参数，等价于 --fast。")
     parser.add_argument("--permission-level", choices=["L1", "L2", "L3", "L4", "L5"], help="模拟用户权限等级。")
     parser.add_argument("--permission-config", default=str(DEFAULT_PERMISSION_CONFIG_PATH), help="知识库权限配置 JSON 路径。")
     parser.add_argument("--rerank-config", default=str(DEFAULT_RERANK_CONFIG_PATH), help="二阶段重排配置 JSON 路径。")
@@ -601,6 +624,12 @@ def get_single_question(args: argparse.Namespace) -> str:
     return (args.question or " ".join(args.question_arg)).strip()
 
 
+def resolve_pipeline_mode_arg(args: argparse.Namespace) -> str:
+    if args.fast or args.skip_preprocess:
+        return "fast"
+    return args.mode
+
+
 def main() -> Optional[Dict[str, Any]]:
     args = parse_args()
     question = get_single_question(args)
@@ -616,6 +645,7 @@ def main() -> Optional[Dict[str, Any]]:
         max_blocks=args.max_blocks,
         temperature=args.temperature,
         skip_preprocess=args.skip_preprocess,
+        pipeline_mode=resolve_pipeline_mode_arg(args),
         permission_level=resolve_permission_level(args),
         permission_config=args.permission_config,
         rerank_config=args.rerank_config,

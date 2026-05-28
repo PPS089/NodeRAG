@@ -4,7 +4,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Set
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -24,6 +24,50 @@ from nodes.retrieval.retrieval_utils import (  # noqa: E402
 
 
 DEFAULT_RERANK_TOP_N = 24
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "rerank_config.json"
+DEFAULT_RERANK_CONFIG = {
+    "enabled": True,
+    "mode": "rule",
+    "rerank_top_n": DEFAULT_RERANK_TOP_N,
+    "final_top_k": DEFAULT_TOP_K,
+    "use_mmr": True,
+    "table_aware": True,
+    "mmr_lambda": DEFAULT_MMR_LAMBDA,
+    "weights": {
+        "vector": 0.44,
+        "bm25": 0.26,
+        "lexical": 0.16,
+        "title_path": 0.14,
+    },
+    "bonuses": {
+        "multi_source": 0.08,
+        "table_chunk": 0.12,
+    },
+}
+
+
+def deep_merge_dict(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    result = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = deep_merge_dict(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def load_rerank_config(config_path: str | Path | None = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
+    if not config_path:
+        return dict(DEFAULT_RERANK_CONFIG)
+
+    path = Path(config_path)
+    if not path.exists():
+        return dict(DEFAULT_RERANK_CONFIG)
+
+    config = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise ValueError(f"重排配置必须是 JSON object: {path}")
+    return deep_merge_dict(DEFAULT_RERANK_CONFIG, config)
 
 
 def lexical_overlap_score(query_tokens: Set[str], hit: Dict[str, Any]) -> float:
@@ -56,6 +100,7 @@ def rerank_hits(
     query_texts: Sequence[str],
     table_aware: bool = True,
     stage_name: str = "rule_rerank",
+    config: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     规则重排：融合向量分、BM25、词面覆盖、标题匹配、来源和表格意图。
@@ -67,19 +112,22 @@ def rerank_hits(
 
     query_tokens = token_set(" ".join(query_texts))
     table_query = table_aware and looks_like_table_query(query_texts)
+    rerank_config = config or DEFAULT_RERANK_CONFIG
+    weights = rerank_config.get("weights") or {}
+    bonuses = rerank_config.get("bonuses") or {}
 
     for hit in ranked_hits:
         metadata = hit.get("metadata", {})
         lexical_score = lexical_overlap_score(query_tokens, hit)
         title_score = title_path_score(query_tokens, hit)
-        source_bonus = 0.08 if len(hit.get("retrieval_sources", [])) > 1 else 0.0
-        table_bonus = 0.12 if table_query and metadata.get("chunk_type") == "table_chunk" else 0.0
+        source_bonus = float(bonuses.get("multi_source", 0.0)) if len(hit.get("retrieval_sources", [])) > 1 else 0.0
+        table_bonus = float(bonuses.get("table_chunk", 0.0)) if table_query and metadata.get("chunk_type") == "table_chunk" else 0.0
 
         rerank_score = (
-            0.44 * float(hit.get("vector_score_norm", 0.0))
-            + 0.26 * float(hit.get("bm25_score_norm", 0.0))
-            + 0.16 * lexical_score
-            + 0.14 * title_score
+            float(weights.get("vector", 0.0)) * float(hit.get("vector_score_norm", 0.0))
+            + float(weights.get("bm25", 0.0)) * float(hit.get("bm25_score_norm", 0.0))
+            + float(weights.get("lexical", 0.0)) * lexical_score
+            + float(weights.get("title_path", 0.0)) * title_score
             + source_bonus
             + table_bonus
         )
@@ -98,6 +146,12 @@ def rerank_hits(
         hit["rerank_score"] = rerank_score
         hit["rerank_stage"] = stage_name
         hit["rerank_features"] = features
+        hit["rerank_weights"] = {
+            "vector": float(weights.get("vector", 0.0)),
+            "bm25": float(weights.get("bm25", 0.0)),
+            "lexical": float(weights.get("lexical", 0.0)),
+            "title_path": float(weights.get("title_path", 0.0)),
+        }
         hit["rerank_reason"] = build_rerank_reason(features)
 
     return sorted(ranked_hits, key=lambda item: item["rerank_score"], reverse=True)
@@ -165,14 +219,36 @@ def mmr_select(
 def rerank_retrieval_result(
     retrieval_result: Dict[str, Any],
     query_texts: Sequence[str] | None = None,
-    rerank_top_n: int = DEFAULT_RERANK_TOP_N,
-    final_top_k: int = DEFAULT_TOP_K,
-    use_mmr: bool = True,
-    table_aware: bool = True,
-    mmr_lambda: float = DEFAULT_MMR_LAMBDA,
+    rerank_top_n: Optional[int] = None,
+    final_top_k: Optional[int] = None,
+    use_mmr: Optional[bool] = None,
+    table_aware: Optional[bool] = None,
+    mmr_lambda: Optional[float] = None,
+    config_path: str | Path | None = DEFAULT_CONFIG_PATH,
+    config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    rerank_config = deep_merge_dict(load_rerank_config(config_path), config or {})
+    rerank_top_n = int(rerank_top_n if rerank_top_n is not None else rerank_config.get("rerank_top_n", DEFAULT_RERANK_TOP_N))
+    final_top_k = int(final_top_k if final_top_k is not None else rerank_config.get("final_top_k", DEFAULT_TOP_K))
+    use_mmr = bool(use_mmr if use_mmr is not None else rerank_config.get("use_mmr", True))
+    table_aware = bool(table_aware if table_aware is not None else rerank_config.get("table_aware", True))
+    mmr_lambda = float(mmr_lambda if mmr_lambda is not None else rerank_config.get("mmr_lambda", DEFAULT_MMR_LAMBDA))
+
     result = dict(retrieval_result)
     hits = list(result.get("hits") or [])
+    if not rerank_config.get("enabled", True):
+        result["hits"] = hits[:final_top_k]
+        result["hit_count"] = len(result["hits"])
+        result["rerank"] = {
+            "enabled": False,
+            "mode": rerank_config.get("mode", "rule"),
+            "rerank_top_n": rerank_top_n,
+            "final_top_k": final_top_k,
+            "input_hit_count": len(hits),
+            "output_hit_count": len(result["hits"]),
+        }
+        return result
+
     if not hits:
         result["hit_count"] = 0
         result["rerank"] = {
@@ -191,19 +267,28 @@ def rerank_retrieval_result(
         + list(result.get("keyword_queries") or [])
     )
     pool = hits[:max(rerank_top_n, final_top_k)]
-    ranked_hits = rerank_hits(pool, query_texts=queries, table_aware=table_aware, stage_name="second_stage_rule_rerank")
+    ranked_hits = rerank_hits(
+        pool,
+        query_texts=queries,
+        table_aware=table_aware,
+        stage_name="second_stage_rule_rerank",
+        config=rerank_config,
+    )
     selected_hits = mmr_select(ranked_hits, top_k=final_top_k, lambda_mult=mmr_lambda) if use_mmr else ranked_hits[:final_top_k]
 
     result["hits"] = selected_hits
     result["hit_count"] = len(selected_hits)
     result["rerank"] = {
         "enabled": True,
-        "mode": "rule",
+        "mode": rerank_config.get("mode", "rule"),
+        "config_path": str(config_path) if config_path else None,
         "rerank_top_n": rerank_top_n,
         "final_top_k": final_top_k,
         "use_mmr": use_mmr,
         "table_aware": table_aware,
         "mmr_lambda": mmr_lambda,
+        "weights": rerank_config.get("weights", {}),
+        "bonuses": rerank_config.get("bonuses", {}),
         "input_hit_count": len(hits),
         "output_hit_count": len(selected_hits),
     }
@@ -224,12 +309,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="独立重排节点：对 RetrievalResult 做二阶段规则重排。")
     parser.add_argument("--input", "-i", help="检索结果 JSON 文件；不传则从 stdin 读取。")
     parser.add_argument("--output", "-o", help="输出 JSON 文件；不传则打印到 stdout。")
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="重排配置 JSON 路径。")
     parser.add_argument("--query", action="append", default=[], help="额外重排 query，可重复传入。")
-    parser.add_argument("--rerank-top-n", type=int, default=DEFAULT_RERANK_TOP_N)
-    parser.add_argument("--final-top-k", type=int, default=DEFAULT_TOP_K)
+    parser.add_argument("--rerank-top-n", type=int, help="覆盖配置中的 rerank_top_n。")
+    parser.add_argument("--final-top-k", type=int, help="覆盖配置中的 final_top_k。")
     parser.add_argument("--no-mmr", action="store_true", help="关闭二阶段 MMR。")
     parser.add_argument("--no-table-aware", action="store_true", help="关闭表格问题加权。")
-    parser.add_argument("--mmr-lambda", type=float, default=DEFAULT_MMR_LAMBDA)
+    parser.add_argument("--mmr-lambda", type=float, help="覆盖配置中的 mmr_lambda。")
     return parser.parse_args()
 
 
@@ -241,9 +327,10 @@ def main() -> Dict[str, Any]:
         query_texts=args.query,
         rerank_top_n=args.rerank_top_n,
         final_top_k=args.final_top_k,
-        use_mmr=not args.no_mmr,
-        table_aware=not args.no_table_aware,
+        use_mmr=False if args.no_mmr else None,
+        table_aware=False if args.no_table_aware else None,
         mmr_lambda=args.mmr_lambda,
+        config_path=args.config,
     )
     output_text = json.dumps(result, ensure_ascii=False, indent=2)
     if args.output:

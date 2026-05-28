@@ -18,7 +18,12 @@ from nodes.query.IntentRouter import route_intent  # noqa: E402
 from nodes.query.LLMClient import OpenAICompatibleChatClient  # noqa: E402
 from nodes.query.PseudoAnswer import generate_pseudo_answer  # noqa: E402
 from nodes.query.QuestionRewriter import rewrite_question  # noqa: E402
-from nodes.rerank.Reranker import DEFAULT_RERANK_TOP_N, rerank_retrieval_result  # noqa: E402
+from nodes.rerank.Reranker import (  # noqa: E402
+    DEFAULT_CONFIG_PATH as DEFAULT_RERANK_CONFIG_PATH,
+    DEFAULT_RERANK_TOP_N,
+    load_rerank_config,
+    rerank_retrieval_result,
+)
 from nodes.retrieval.ChromaRetriever import retrieve  # noqa: E402
 from nodes.auth.PermissionGuard import (  # noqa: E402
     DEFAULT_CONFIG_PATH as DEFAULT_PERMISSION_CONFIG_PATH,
@@ -100,7 +105,8 @@ class RAGPipeline:
         skip_preprocess: bool = False,
         permission_level: str = DEFAULT_PERMISSION_LEVEL,
         permission_config: str | Path = DEFAULT_PERMISSION_CONFIG_PATH,
-        rerank_top_n: int = DEFAULT_RERANK_TOP_N,
+        rerank_config: str | Path = DEFAULT_RERANK_CONFIG_PATH,
+        rerank_top_n: Optional[int] = None,
         disable_second_stage_rerank: bool = False,
     ) -> None:
         self.top_k = top_k
@@ -109,7 +115,9 @@ class RAGPipeline:
         self.max_blocks = max_blocks
         self.temperature = temperature
         self.skip_preprocess = skip_preprocess
-        self.rerank_top_n = rerank_top_n
+        self.rerank_config_path = rerank_config
+        self.rerank_config = load_rerank_config(rerank_config)
+        self.rerank_top_n = int(rerank_top_n if rerank_top_n is not None else self.rerank_config.get("rerank_top_n", DEFAULT_RERANK_TOP_N))
         self.disable_second_stage_rerank = disable_second_stage_rerank
         self.permission_context = build_permission_context(permission_level, permission_config)
         self.chat_client = OpenAICompatibleChatClient()
@@ -288,6 +296,7 @@ class RAGPipeline:
             final_top_k=self.top_k,
             use_mmr=True,
             table_aware=True,
+            config_path=self.rerank_config_path,
         )
         context["rerank_result"] = context["retrieval_result"].get("rerank", {})
         return context
@@ -450,6 +459,7 @@ def run_interactive(args: argparse.Namespace) -> None:
         skip_preprocess=args.skip_preprocess,
         permission_level=permission_level,
         permission_config=args.permission_config,
+        rerank_config=args.rerank_config,
         rerank_top_n=args.rerank_top_n,
         disable_second_stage_rerank=args.no_second_stage_rerank,
     )
@@ -490,7 +500,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-preprocess", action="store_true", help="跳过路由/改写/伪答案，直接检索原问题。")
     parser.add_argument("--permission-level", choices=["L1", "L2", "L3", "L4", "L5"], help="模拟用户权限等级。")
     parser.add_argument("--permission-config", default=str(DEFAULT_PERMISSION_CONFIG_PATH), help="知识库权限配置 JSON 路径。")
-    parser.add_argument("--rerank-top-n", type=int, default=DEFAULT_RERANK_TOP_N, help="二阶段重排候选数量。")
+    parser.add_argument("--rerank-config", default=str(DEFAULT_RERANK_CONFIG_PATH), help="二阶段重排配置 JSON 路径。")
+    parser.add_argument("--rerank-top-n", type=int, help="覆盖重排配置中的 rerank_top_n。")
     parser.add_argument("--no-second-stage-rerank", action="store_true", help="关闭权限过滤后的二阶段重排。")
     parser.add_argument("--show-trace", action="store_true", help="打印完整链路 JSON。")
     parser.add_argument("--trace-dir", help="保存每轮完整链路 JSON 的目录。")
@@ -519,6 +530,7 @@ def main() -> Optional[Dict[str, Any]]:
         skip_preprocess=args.skip_preprocess,
         permission_level=resolve_permission_level(args),
         permission_config=args.permission_config,
+        rerank_config=args.rerank_config,
         rerank_top_n=args.rerank_top_n,
         disable_second_stage_rerank=args.no_second_stage_rerank,
     )

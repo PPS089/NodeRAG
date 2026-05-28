@@ -1,0 +1,19 @@
+{
+  "enabled": true,
+  "mode": "rule",
+  "rerank_top_n": 24,
+  "final_top_k": 8,
+  "use_mmr": true,
+  "table_aware": true,
+  "mmr_lambda": 0.72,
+  "weights": {
+    "vector": 0.44,
+    "bm25": 0.26,
+    "lexical": 0.16,
+    "title_path": 0.14
+  },
+  "bonuses": {
+    "multi_source": 0.08,
+    "table_chunk": 0.12
+  }
+}

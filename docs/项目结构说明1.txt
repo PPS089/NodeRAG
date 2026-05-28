@@ -1,13 +1,13 @@
 NodeRAG
 |
 |--data # 原始 PDF 数据目录，MinerUStandardReader.py 会从这里批量读取 PDF
-|   |--公司公开制度库.pdf
-|   |--HR基础制度库.pdf
-|   |--HR薪酬制度库.pdf
-|   |--销售产品资料库.pdf
-|   |--销售价格策略库.pdf
-|   |--法务合同模板库.pdf
-|   |--财务预算知识库.pdf
+|   |--公司公开制度库_正式版.pdf
+|   |--HR基础制度库_正式版.pdf
+|   |--HR薪酬制度库_正式版.pdf
+|   |--销售产品资料库_正式版.pdf
+|   |--销售价格策略库_正式版.pdf
+|   |--法务合同模板库_正式版.pdf
+|   |--财务预算知识库_正式版.pdf
 |
 |--config # 项目配置目录
 |   |--knowledge_permissions.json # 知识库权限配置，维护权限等级、权限码、文档名匹配规则
@@ -17,7 +17,12 @@ NodeRAG
 |   |--项目结构说明1.txt # 当前项目结构说明
 |   |--nodes节点使用说明.md # nodes 各节点职责、输入输出和常用命令
 |   |--node_io_contract.md # 节点输入输出契约和 Pipeline 插入节点说明
+|   |--知识库入库流程.md # PDF 到 MinerU、清洗、分片、Chroma 的一键入库说明
+|   |--RAG运行说明.md # 完整 RAG 单次/循环运行、standard/fast 模式说明
+|   |--权限配置说明.md # 权限等级、权限码、知识库扩展和校验说明
+|   |--日志说明.md # JSONL 日志路径、上海时区、字段和排查说明
 |   |--分片策略.txt # 分片策略说明
+|   |--重排策略.txt # 检索重排策略说明
 |   |--删除向量库数据.txt # 删除 PDF 后清理向量库数据说明
 |
 |--MinerUResult # PDF 解析、清洗、分片结果目录，由运行脚本生成
@@ -85,7 +90,7 @@ NodeRAG
 |
 |--rags # 完整 RAG 编排目录，可独立运行
 |   |--IngestPipeline.py # 一键入库脚本：PDF -> MinerU -> 清洗 -> 分片 -> Chroma 向量库
-|   |--RAGPipeline.py # 循环式 RAG 主流程，按 stage 编排路由、改写、权限、检索、压缩、Prompt、回答
+|   |--RAGPipeline.py # 循环式 RAG 主流程，支持 standard/fast 两种模式
 |   |--rag001.py # 早期/实验性 RAG 编排脚本
 |   |--__init__.py
 |
@@ -104,6 +109,7 @@ NodeRAG
 |--.gitignore # Git 忽略规则
 |--pyproject.toml # Python 项目配置和依赖声明
 |--uv.lock # uv 依赖锁定文件
+|--README.md # 项目总览、快速开始和常用命令
 |--retrieval_result.json # 检索结果示例/调试文件，由脚本输出生成
 |--compressed_context.json # 上下文压缩结果示例/调试文件，由脚本输出生成
 |--final_prompt.json # Prompt 组装结果示例/调试文件，由脚本输出生成
@@ -138,6 +144,7 @@ NodeRAG
 |--运行完整 RAG
 |   |--.\.venv\Scripts\python.exe rags\RAGPipeline.py
 |   |--.\.venv\Scripts\python.exe rags\RAGPipeline.py --permission-level L2 --question "新员工入职当天需要完成哪些事项？"
+|   |--.\.venv\Scripts\python.exe rags\RAGPipeline.py --fast --permission-level L2 --question "新员工入职当天需要完成哪些事项？"
 |
 |--检查权限配置
 |   |--.\.venv\Scripts\python.exe nodes\auth\PermissionGuard.py --permission-level L3
@@ -148,7 +155,9 @@ NodeRAG
 
 注意事项：
 
-1. `__pycache__` 是 Python 运行生成的缓存目录，不属于业务结构说明重点。（没传）
-2. `retrieval_result.json`、`compressed_context.json`、`final_prompt.json` 是调试输出文件，可按需重新生成。（也没传）
+1. `__pycache__` 是 Python 运行生成的缓存目录，不属于业务结构说明重点。
+2. `retrieval_result.json`、`compressed_context.json`、`final_prompt.json` 是调试输出文件，可按需重新生成。
 3. 不建议使用 PowerShell 的 `>` 保存 JSON，可能写成 UTF-16；优先使用脚本自带 `--output`。
 4. 权限配置依赖 Chroma metadata 中的 `document_name`，新增 PDF 后建议同步维护 `config/knowledge_permissions.json`。
+5. `README.md` 是项目入口文档；更细的节点和策略说明放在 `docs/`。
+6. 入库、运行、权限、日志分别有独立说明文档，优先查看对应主题文档。

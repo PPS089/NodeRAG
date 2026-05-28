@@ -136,12 +136,17 @@ class MinerUStandardReader:
         if page_ranges:
             payload["page_ranges"] = page_ranges
 
-        # 构造用于生成缓存 key 的信息
-        # 注意这里额外加入了 file_hash
-        # 因为本地文件没有稳定 URL，所以必须用文件内容 hash 判断是否是同一个文件
+        # 构造用于生成缓存 key 的信息。
+        # file_name 只影响 MinerU 上传展示名，不应影响解析结果缓存；
+        # 因此缓存身份使用文件内容 hash + 解析参数，避免同内容文件改名后重复上传。
+        cache_payload = {
+            key: value
+            for key, value in payload.items()
+            if key != "file_name"
+        }
         cache_identity = {
             "file_hash": file_hash,
-            "payload": payload,
+            "payload": cache_payload,
         }
 
         # 根据文件 hash 和解析参数生成缓存 key

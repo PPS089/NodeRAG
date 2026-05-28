@@ -14,7 +14,9 @@
       "permission_code": "KB.PUBLIC.READ",
       "document_names": [
         "公司公开制度库",
-        "公司公开制度库.pdf"
+        "公司公开制度库.pdf",
+        "公司公开制度库_正式版",
+        "公司公开制度库_正式版.pdf"
       ],
       "document_patterns": [
         "*公司公开制度库*"
@@ -26,7 +28,11 @@
       "permission_code": "KB.HR.BASIC.READ",
       "document_names": [
         "HR 基础制度库",
-        "HR 基础制度库.pdf"
+        "HR 基础制度库.pdf",
+        "HR基础制度库",
+        "HR基础制度库.pdf",
+        "HR基础制度库_正式版",
+        "HR基础制度库_正式版.pdf"
       ],
       "document_patterns": [
         "*HR 基础制度库*",
@@ -39,7 +45,11 @@
       "permission_code": "KB.HR.SALARY.READ",
       "document_names": [
         "HR 薪酬制度库",
-        "HR 薪酬制度库.pdf"
+        "HR 薪酬制度库.pdf",
+        "HR薪酬制度库",
+        "HR薪酬制度库.pdf",
+        "HR薪酬制度库_正式版",
+        "HR薪酬制度库_正式版.pdf"
       ],
       "document_patterns": [
         "*HR 薪酬制度库*",
@@ -52,7 +62,9 @@
       "permission_code": "KB.SALES.PRODUCT.READ",
       "document_names": [
         "销售产品资料库",
-        "销售产品资料库.pdf"
+        "销售产品资料库.pdf",
+        "销售产品资料库_正式版",
+        "销售产品资料库_正式版.pdf"
       ],
       "document_patterns": [
         "*销售产品资料库*"
@@ -64,7 +76,9 @@
       "permission_code": "KB.SALES.PRICE.READ",
       "document_names": [
         "销售价格策略库",
-        "销售价格策略库.pdf"
+        "销售价格策略库.pdf",
+        "销售价格策略库_正式版",
+        "销售价格策略库_正式版.pdf"
       ],
       "document_patterns": [
         "*销售价格策略库*"
@@ -76,7 +90,9 @@
       "permission_code": "KB.LEGAL.CONTRACT.READ",
       "document_names": [
         "法务合同模板库",
-        "法务合同模板库.pdf"
+        "法务合同模板库.pdf",
+        "法务合同模板库_正式版",
+        "法务合同模板库_正式版.pdf"
       ],
       "document_patterns": [
         "*法务合同模板库*"
@@ -88,7 +104,9 @@
       "permission_code": "KB.FINANCE.BUDGET.READ",
       "document_names": [
         "财务预算知识库",
-        "财务预算知识库.pdf"
+        "财务预算知识库.pdf",
+        "财务预算知识库_正式版",
+        "财务预算知识库_正式版.pdf"
       ],
       "document_patterns": [
         "*财务预算知识库*"

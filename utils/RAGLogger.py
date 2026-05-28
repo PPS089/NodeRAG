@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -11,18 +11,27 @@ from typing import Any, Dict, Optional
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LOG_DIR = PROJECT_ROOT / "logs"
 DEFAULT_LOG_FILE = DEFAULT_LOG_DIR
+SHANGHAI_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 
 
 def new_trace_id() -> str:
     return uuid.uuid4().hex
 
 
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def shanghai_now() -> datetime:
+    return datetime.now(SHANGHAI_TZ)
+
+
+def shanghai_now_iso() -> str:
+    return shanghai_now().isoformat()
 
 
 def daily_log_file(log_root: str | Path, now: Optional[datetime] = None) -> Path:
-    current = now or datetime.now()
+    current = now or shanghai_now()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=SHANGHAI_TZ)
+    else:
+        current = current.astimezone(SHANGHAI_TZ)
     root = Path(log_root)
     return root / f"{current:%Y}" / f"{current:%m}" / f"{current:%Y-%m-%d}.jsonl"
 
@@ -52,7 +61,8 @@ class RAGLogger:
             return
 
         payload: Dict[str, Any] = {
-            "ts": utc_now_iso(),
+            "ts": shanghai_now_iso(),
+            "timezone": "Asia/Shanghai",
             "trace_id": trace_id,
             "event": event,
         }

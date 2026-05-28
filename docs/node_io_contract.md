@@ -29,6 +29,7 @@
 | --- | --- | --- |
 | `question` | `str` | 原始用户问题 |
 | `trace_id` | `str` | 当前请求链路 ID，用于日志和 trace 关联 |
+| `pipeline_mode` | `str` | 当前 RAG 模式：`standard` 或 `fast` |
 | `input_document_names` | `list[str]` | CLI 或调用方传入的文档过滤条件 |
 | `input_chunk_types` | `list[str]` | CLI 或调用方传入的 chunk 类型过滤条件 |
 | `route_result` | `dict | None` | 意图路由输出 |
@@ -271,6 +272,7 @@ logs/YYYY/MM/YYYY-MM-DD.jsonl
 
 ```text
 ts
+timezone
 trace_id
 event
 stage
@@ -295,7 +297,9 @@ stage_error
 约束：
 
 - 日志不记录完整文档内容。
+- `ts` 使用上海时区，日志中固定写入 `timezone=Asia/Shanghai`。
 - Pipeline 返回结果包含 `trace_id`，方便和日志关联。
+- Pipeline 返回结果和日志 metrics 包含 `pipeline_mode`，用于区分 `standard` 和 `fast`。
 - 可以通过 `--no-log` 关闭日志，通过 `--log-file` 指定日志路径。
 
 ## 10. 插入新节点的最低要求

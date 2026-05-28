@@ -1,6 +1,192 @@
-section_chunk：按 Markdown 标题 # / ## / ### 建立章节结构
-text_chunk：正文按段落聚合，超过约 1200 字符时尽量按句号、问号、换行等自然边界切分，并保留约 120 字符重叠
-table_chunk：HTML 表格和 Markdown 表格单独成块，表格内容会转成 table_text 供检索使用
-image_chunk：Markdown 图片单独成块，正文中用 IMAGE_REF 引用
-引用关系：正文中遇到表格/图片，会生成 TABLE_REF / IMAGE_REF，保留文本块与结构化块之间的关联
-检索增强：每个 chunk 增加 embedding_text，包含文档名、章节路径和正文/表格摘要，后续应优先用它做向量化
+NodeRAG 分片策略
+
+一、目标
+
+分片的目标不是简单切文本，而是为 RAG 检索保留文档结构、上下文关系和表格/图片等特殊内容。
+
+当前分片由两个节点完成：
+
+|--nodes/chunks/MarkDownChunk.py # 基础 Markdown 分片
+|--nodes/chunks/HybridMarkdownChunk.py # 检索增强分片
+
+
+二、输入输出
+
+输入：
+
+|--MinerUResult/<文档名>_<hash>/DataCleaned.md
+
+基础分片输出：
+
+|--MinerUResult/<文档名>_<hash>/DataCleaned.chunks.json
+
+Hybrid 分片输出：
+
+|--MinerUResult/<文档名>_<hash>/DataCleaned.hybrid_chunks.json
+
+Chroma 入库默认使用 Hybrid 分片结果。
+
+
+三、基础分片类型
+
+1. section_chunk
+
+按 Markdown 标题建立章节结构。
+
+作用：
+
+|--保留标题层级
+|--作为 Parent-Child 的 parent section
+|--为 Small-to-Big 提供扩展上下文
+
+2. text_chunk
+
+正文按段落聚合。
+
+规则：
+
+|--默认最大约 1200 字符
+|--超过长度时优先按句号、问号、换行等自然边界切分
+|--保留约 120 字符重叠
+
+3. table_chunk
+
+HTML 表格和 Markdown 表格单独成块。
+
+规则：
+
+|--表格不混入普通正文
+|--表格内容会转换成 table_text
+|--表格过大时按行数和长度限制处理
+
+4. image_chunk
+
+Markdown 图片单独成块。
+
+规则：
+
+|--图片路径、alt 文本独立保存
+|--正文中通过 IMAGE_REF 关联图片
+
+
+四、引用关系
+
+正文遇到表格或图片时，会保留引用关系：
+
+|--TABLE_REF:{chunk_id}
+|--IMAGE_REF:{chunk_id}
+
+相关字段：
+
+|--refs
+|--ref_target_ids
+|--referenced_by_text_chunk_ids
+
+作用：
+
+|--检索命中文本时可扩展到相关表格/图片
+|--检索命中表格/图片时可回溯引用它的正文
+
+
+五、Hybrid 增强字段
+
+Hybrid 分片会在基础 chunk 上增加 RAG 检索字段。
+
+关键字段：
+
+|--chunk_schema_version
+|--chunk_strategy
+|--document_id
+|--retrieval_role
+|--should_embed
+|--semantic_unit_type
+|--parent_context
+|--neighbor_chunk_ids
+|--related_ref_chunk_ids
+|--small_to_big_context_ids
+|--embedding_text
+
+
+六、向量化策略
+
+默认只有以下 chunk 会进入向量库：
+
+|--text_chunk
+|--table_chunk
+|--image_chunk
+
+不会默认 embedding：
+
+|--section_chunk
+
+原因：
+
+|--section_chunk 主要作为父级上下文
+|--检索时优先命中可回答问题的正文/表格/图片
+|--命中后通过 small_to_big_context_ids 扩展父级章节
+
+
+七、embedding_text 构造
+
+`embedding_text` 是专门给向量化使用的检索文本，不等同于原始正文。
+
+典型内容：
+
+|--文档名
+|--章节路径
+|--正文内容
+|--表格描述和 table_text
+|--图片说明
+
+这样做的原因：
+
+|--让向量模型同时看到正文和结构信息
+|--提高标题/章节相关问题的召回率
+|--让表格类问题更容易命中 table_chunk
+
+
+八、Small-to-Big 策略
+
+每个可检索子 chunk 会维护：
+
+|--parent section
+|--前后邻居 chunk
+|--引用到的表格/图片
+|--引用当前表格/图片的正文
+
+对应字段：
+
+|--small_to_big_context_ids
+
+检索命中后，`ChromaRetriever.py` 会通过 `context_expander.py` 扩展上下文。
+
+
+九、运行命令
+
+推荐使用一键入库：
+
+```powershell
+.\.venv\Scripts\python.exe rags\IngestPipeline.py
+```
+
+只运行分片：
+
+```powershell
+.\.venv\Scripts\python.exe nodes\chunks\HybridMarkdownChunk.py
+```
+
+处理单个清洗后的 Markdown：
+
+```powershell
+.\.venv\Scripts\python.exe nodes\chunks\HybridMarkdownChunk.py `
+  MinerUResult\<文档目录>\DataCleaned.md
+```
+
+
+十、注意事项
+
+1. 分片前必须先生成 `DataCleaned.md`。
+2. 表格类问题依赖 `table_chunk` 和 `table_text`，清洗阶段不要破坏 HTML 表格。
+3. `document_id` 来自 `MinerUResult/<文档名>_<hash>` 目录名，是向量库增量和删除的重要依据。
+4. 如果修改分片逻辑，需要重新运行分片和 embedding。
+5. 如果 chunk id/hash 变化，Chroma 会把变化 chunk 当作新内容入库。

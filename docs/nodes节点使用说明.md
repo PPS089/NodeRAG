@@ -8,6 +8,37 @@ cd 自己的项目根目录
 
 ## 0. 环境配置
 
+节点脚本默认在项目根目录执行，并从项目根目录查找 `.env`、`data/`、`MinerUResult/`、`ChromaDB/` 等路径。
+
+推荐先准备：
+
+```text
+data/                         # 放入待处理 PDF
+.env                          # 本地模型、MinerU、Chroma 配置
+config/knowledge_permissions.json
+config/rerank_config.json
+```
+
+`.env` 至少需要包含：
+
+```env
+MINERU_API_TOKEN=你的MinerUToken
+
+LLM_API_KEY=你的百炼或OpenAI兼容Key
+LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+LLM_MODEL=qwen-plus
+
+EMBEDDING_API_KEY=你的百炼EmbeddingKey
+EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+EMBEDDING_MODEL=text-embedding-v4
+
+CHROMA_PERSIST_DIR=ChromaDB
+CHROMA_COLLECTION_NAME=document_chunks
+CHROMA_SYNC_MODE=chunk
+```
+
+如果只验证非 LLM 节点，比如分片或权限配置检查，对应外部 API 配置可以暂时不填；一旦运行 MinerU、embedding、路由、改写、伪答案或最终回答节点，就需要相应密钥可用。
+
 ## 1. 文档处理节点
 
 ### 1.1 MinerUStandardReader.py
@@ -564,6 +595,31 @@ rags/RAGPipeline.py
   --question "新员工入职当天需要完成哪些事项？"
 ```
 
+运行模式：
+
+```text
+standard # 默认模式：IntentRouter -> QuestionRewriter -> PseudoAnswer -> 检索 -> 回答
+fast     # 快速模式：跳过路由/改写/伪答案，只用原问题检索
+```
+
+快速模式：
+
+```powershell
+.\.venv\Scripts\python.exe rags\RAGPipeline.py `
+  --fast `
+  --permission-level L2 `
+  --question "新员工入职当天需要完成哪些事项？"
+```
+
+也可以显式指定：
+
+```powershell
+.\.venv\Scripts\python.exe rags\RAGPipeline.py `
+  --mode fast `
+  --permission-level L2 `
+  --question "新员工入职当天需要完成哪些事项？"
+```
+
 指定日志文件：
 
 ```powershell
@@ -604,10 +660,20 @@ q
 完整链路：
 
 ```text
+standard:
 IntentRouter
 → QuestionRewriter
 → PseudoAnswer
 → PermissionGuard
+→ ChromaRetriever
+→ PermissionGuard
+→ Reranker
+→ ContextCompressor
+→ PromptBuilder
+→ LLM 最终回答
+
+fast:
+PermissionGuard
 → ChromaRetriever
 → PermissionGuard
 → Reranker
@@ -621,7 +687,8 @@ IntentRouter
 - 不建议使用 PowerShell 的 `>` 保存 JSON，可能写成 UTF-16。
 - 优先使用脚本自带 `--output` 参数。
 - `PseudoAnswer` 只用于检索增强，不能作为事实依据。
+- `fast` 模式返回和日志中都会标记 `pipeline_mode=fast`，便于和 `standard` 模式区分。
 - 最终回答必须基于 `ContextCompressor` 产生的上下文。
 - 权限配置依赖 Chroma metadata 中的 `document_name`，真实 PDF 名称建议写入 `config/knowledge_permissions.json` 的 `document_names`。
-- 默认日志按年月日分文件，形如 `logs/YYYY/MM/YYYY-MM-DD.jsonl`，每行一条 JSON，包含 `trace_id`、`stage`、`elapsed_ms`、`status` 和关键计数。
+- 默认日志按上海时区年月日分文件，形如 `logs/YYYY/MM/YYYY-MM-DD.jsonl`，每行一条 JSON，包含 `ts`、`timezone=Asia/Shanghai`、`trace_id`、`stage`、`elapsed_ms`、`status` 和关键计数。
 - 删除 PDF 后，如果也删除了对应 `MinerUResult` 目录，需要运行 `ChromaDocumentCleaner.py` 清理向量库。

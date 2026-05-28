@@ -1,10 +1,141 @@
-先删除pdf，再删除MinerUResult中对应的pdf的文件夹，最后运行脚本
-会得到一个类似的输出
+删除 PDF 后清理 Chroma 向量库数据
+
+一、为什么需要单独清理
+
+删除 `data/` 里的 PDF，不会自动删除 ChromaDB 中已经写入的向量。
+
+原因：
+
+|--PDF 原始文件只影响后续解析
+|--ChromaDB 是独立持久化向量库
+|--删除文件系统中的 PDF 不会触发 Chroma delete
+
+因此删除 PDF 后，需要同步清理：
+
+|--data/<PDF 文件>
+|--MinerUResult/<文档名>_<hash>/
+|--ChromaDB 中对应 document_id 的向量
+
+
+二、清理脚本
+
+脚本路径：
+
+|--nodes/embeddings/ChromaDocumentCleaner.py
+
+作用：
+
+|--按 document_id 删除
+|--按 document_name 查找 document_id 后删除
+|--删除 Chroma 中存在但 MinerUResult 本地已不存在的文档
+
+
+三、推荐清理流程
+
+1. 删除原始 PDF
+
+```text
+data/<PDF 文件名>.pdf
+```
+
+2. 删除对应 MinerUResult 目录
+
+```text
+MinerUResult/<文档名>_<hash>/
+```
+
+3. 运行清理脚本
+
+```powershell
+.\.venv\Scripts\python.exe nodes\embeddings\ChromaDocumentCleaner.py --prune-missing
+```
+
+如果不传任何参数，默认也会执行 `--prune-missing`。
+
+
+四、按 document_id 删除
+
+适合你明确知道文档目录名时使用。
+
+示例：
+
+```powershell
+.\.venv\Scripts\python.exe nodes\embeddings\ChromaDocumentCleaner.py `
+  --document-id "HR基础制度库_正式版_4471bb6ea39e"
+```
+
+`document_id` 来源：
+
+```text
+MinerUResult/<文档名>_<hash>
+```
+
+也就是 MinerUResult 下的文档目录名。
+
+
+五、按 document_name 删除
+
+适合你知道文档名称，但不知道 document_id 时使用。
+
+示例：
+
+```powershell
+.\.venv\Scripts\python.exe nodes\embeddings\ChromaDocumentCleaner.py `
+  --document-name "HR基础制度库_正式版"
+```
+
+脚本会先在 Chroma metadata 中查找同名文档，再删除对应 document_id。
+
+
+六、输出示例
+
+```json
 {
   "deleted_document_count": 1,
   "deleted_vector_count": 19,
   "details": {
-    "HR基础制度库_c4f9a1d879b8": 19
+    "HR基础制度库_正式版_4471bb6ea39e": 19
   },
   "mode": "delete_by_document_id"
 }
+```
+
+字段含义：
+
+|--deleted_document_count # 实际删除的文档数量
+|--deleted_vector_count # 实际删除的向量数量
+|--details # 每个 document_id 删除了多少条向量
+|--mode # 当前清理模式
+
+
+七、和增量入库的关系
+
+如果只是更新 PDF 内容，不一定要手动清理。
+
+推荐做法：
+
+```powershell
+.\.venv\Scripts\python.exe rags\IngestPipeline.py
+```
+
+当 `.env` 中配置：
+
+```env
+CHROMA_SYNC_MODE=chunk
+```
+
+入库节点会：
+
+|--跳过已存在 chunk
+|--写入新增/变化 chunk
+|--删除同 document_id 下已经不存在的过期 chunk
+
+只有彻底删除某个 PDF 或 MinerUResult 目录时，才需要运行 `ChromaDocumentCleaner.py`。
+
+
+八、注意事项
+
+1. 删除 Chroma 向量是不可逆操作，执行前确认 document_id/document_name。
+2. 不要直接删除 `ChromaDB/`，除非你想重建整个向量库。
+3. `document_name` 依赖 metadata，真实 PDF 改名后建议同步更新 `config/knowledge_permissions.json`。
+4. 清理后可以重新运行 `rags/IngestPipeline.py --dry-run` 查看当前 data 中的 PDF。

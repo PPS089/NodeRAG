@@ -1,20 +1,154 @@
 NodeRAG
 |
-|--data # 测试数据
+|--data # 原始 PDF 数据目录，MinerUStandardReader.py 会从这里批量读取 PDF
+|   |--公司公开制度库.pdf
+|   |--HR基础制度库.pdf
+|   |--HR薪酬制度库.pdf
+|   |--销售产品资料库.pdf
+|   |--销售价格策略库.pdf
+|   |--法务合同模板库.pdf
+|   |--财务预算知识库.pdf
 |
-|--docs # 文档
-|   |--项目结构说明1.txt
+|--config # 项目配置目录
+|   |--knowledge_permissions.json # 知识库权限配置，维护权限等级、权限码、文档名匹配规则
+|   |--rerank_config.json # 二阶段重排配置，维护重排权重、候选数量、MMR 和表格加权
 |
-|--MinerUResult # PDF 处理结果
+|--docs # 项目说明文档
+|   |--项目结构说明1.txt # 当前项目结构说明
+|   |--nodes节点使用说明.md # nodes 各节点职责、输入输出和常用命令
+|   |--node_io_contract.md # 节点输入输出契约和 Pipeline 插入节点说明
+|   |--分片策略.txt # 分片策略说明
+|   |--删除向量库数据.txt # 删除 PDF 后清理向量库数据说明
 |
-|--nodes # RAG 的单处理节点
+|--MinerUResult # PDF 解析、清洗、分片结果目录，由运行脚本生成
+|   |--<文档名>_<hash>
+|       |--full.md # MinerU 解析后的完整 Markdown
+|       |--mineru_meta.json # MinerU 解析元数据
+|       |--DataCleaned.md # 清洗后的 Markdown
+|       |--DataCleaned.chunks.json # 基础 Markdown 分片结果
+|       |--DataCleaned.hybrid_chunks.json # 混合分片结果，用于 embedding 入库
+|
+|--nodes # RAG 的单处理节点，每个目录负责一类独立处理能力
+|   |
 |   |--auth # 权限校验节点
-|       |--UserCodeAuth.py # 代码校验
-|       |--userLLMAuth.py # 大模型校验
+|   |   |--PermissionGuard.py # 知识库权限等级模拟、检索前过滤、检索后兜底过滤
+|   |   |--UserCodeAuth.py # 预留：代码校验节点
+|   |   |--userLLMAuth.py # 预留：大模型校验节点
+|   |   |--__init__.py
+|   |
 |   |--chunks # 分片节点
-|       |--MarkDownChunk.py # 对 md 文档的切分处理
-|   |--documents #文档处理节点
-|       |--DataClean.py # 数据清洗
-|       |--MinerUStandardReader.py # 使用 MinerU 处理 PDF 文档
+|   |   |--MarkDownChunk.py # 基础 Markdown 分片，识别标题、正文、表格、图片等
+|   |   |--HybridMarkdownChunk.py # 混合分片，支持 Parent-Child、Small-to-Big、Table-Aware
+|   |   |--__init__.py
+|   |
+|   |--context # 上下文处理节点
+|   |   |--ContextCompressor.py # 对检索结果进行合并、去重、压缩，并生成引用信息
+|   |   |--__init__.py
+|   |
+|   |--documents # 文档处理节点
+|   |   |--MinerUStandardReader.py # 从 data 读取 PDF，调用 MinerU 解析并输出到 MinerUResult
+|   |   |--DataClean.py # 读取 MinerUResult 中的 full.md，清洗后输出 DataCleaned.md
+|   |   |--__init__.py
+|   |
+|   |--embeddings # 向量入库和向量库维护节点
+|   |   |--ChromaBailianEmbedding.py # 使用百炼 embedding 模型生成向量并写入 Chroma，支持 chunk 级增量更新
+|   |   |--ChromaDocumentCleaner.py # 删除 PDF 后，按 document_id/name 清理 Chroma 中对应向量数据
+|   |   |--__init__.py
+|   |
+|   |--prompt # Prompt 组装节点
+|   |   |--PromptBuilder.py # 根据压缩上下文、路由、改写、伪答案组装最终 messages
+|   |   |--__init__.py
+|   |
+|   |--rerank # 重排节点
+|   |   |--Reranker.py # 二阶段规则重排，支持独立 CLI 和 Pipeline stage 调用
+|   |   |--__init__.py
+|   |
+|   |--query # 用户问题前处理节点
+|   |   |--LLMClient.py # OpenAI-compatible/百炼兼容的 LLM 客户端封装
+|   |   |--IntentRouter.py # 意图路由，判断是否需要检索以及可能的文档/类型过滤
+|   |   |--QuestionRewriter.py # 问题改写，生成检索 query 和关键词 query
+|   |   |--PseudoAnswer.py # 伪答案生成，用于 HyDE 检索增强
+|   |   |--__init__.py
+|   |
+|   |--retrieval # 检索节点
+|   |   |--ChromaRetriever.py # Chroma 检索编排入口，组装召回、初排、MMR、上下文扩展
+|   |   |--chroma_store.py # Chroma collection 获取和向量召回
+|   |   |--bm25_recall.py # BM25 关键词召回
+|   |   |--context_expander.py # Small-to-Big 上下文扩展
+|   |   |--filters.py # document_id/document_name/chunk_type 过滤器
+|   |   |--retrieval_config.py # 检索默认参数和常量
+|   |   |--retrieval_utils.py # 检索公共工具函数
+|   |   |--__init__.py
+|   |
+|   |--contracts.py # 节点输入输出契约校验，降低节点间隐式耦合
+|   |--__init__.py
+|
+|--rags # 完整 RAG 编排目录，可独立运行
+|   |--IngestPipeline.py # 一键入库脚本：PDF -> MinerU -> 清洗 -> 分片 -> Chroma 向量库
+|   |--RAGPipeline.py # 循环式 RAG 主流程，按 stage 编排路由、改写、权限、检索、压缩、Prompt、回答
+|   |--rag001.py # 早期/实验性 RAG 编排脚本
+|   |--__init__.py
 |
 |--utils # 工具包
+|   |--FindProjectRoot.py # 查找项目根目录
+|   |--PDFSwitchMd.py # PDF/Markdown 转换相关工具
+|   |--RAGLogger.py # RAG Pipeline 结构化 JSONL 日志工具
+|   |--__init__.py
+|
+|--logs # RAG 运行日志目录，由 RAGPipeline.py 自动生成，默认不提交版本库
+|   |--2026
+|       |--05
+|           |--2026-05-28.jsonl # 按年/月分目录，按日分 JSONL 文件；每行一条 JSON 日志
+|
+|--.env # 本地环境变量配置，不应提交到版本库
+|--.gitignore # Git 忽略规则
+|--pyproject.toml # Python 项目配置和依赖声明
+|--uv.lock # uv 依赖锁定文件
+|--retrieval_result.json # 检索结果示例/调试文件，由脚本输出生成
+|--compressed_context.json # 上下文压缩结果示例/调试文件，由脚本输出生成
+|--final_prompt.json # Prompt 组装结果示例/调试文件，由脚本输出生成
+
+
+核心处理链路：
+
+1. 文档解析：data/*.pdf -> MinerUStandardReader.py -> MinerUResult/<文档名>_<hash>/full.md
+2. 数据清洗：full.md -> DataClean.py -> DataCleaned.md
+3. 文档分片：DataCleaned.md -> HybridMarkdownChunk.py -> DataCleaned.hybrid_chunks.json
+4. 向量入库：DataCleaned.hybrid_chunks.json -> ChromaBailianEmbedding.py -> Chroma 向量库
+5. 问题前处理：IntentRouter.py / QuestionRewriter.py / PseudoAnswer.py
+6. 权限控制：PermissionGuard.py 根据 config/knowledge_permissions.json 限制可检索知识库
+7. 检索召回：ChromaRetriever.py 从 Chroma 中召回候选 chunk
+8. 二阶段重排：Reranker.py 对权限过滤后的检索结果做规则重排和 MMR
+9. 上下文压缩：ContextCompressor.py 压缩检索结果并生成 citations
+10. Prompt 组装：PromptBuilder.py 生成最终 messages
+11. RAG 编排：RAGPipeline.py 支持单次问答和循环问答
+
+
+常用运行入口：
+
+|--首次构建知识库
+|   |--.\.venv\Scripts\python.exe rags\IngestPipeline.py
+|
+|--分步构建知识库
+|   |--.\.venv\Scripts\python.exe nodes\documents\MinerUStandardReader.py
+|   |--.\.venv\Scripts\python.exe nodes\documents\DataClean.py
+|   |--.\.venv\Scripts\python.exe nodes\chunks\HybridMarkdownChunk.py
+|   |--.\.venv\Scripts\python.exe nodes\embeddings\ChromaBailianEmbedding.py
+|
+|--运行完整 RAG
+|   |--.\.venv\Scripts\python.exe rags\RAGPipeline.py
+|   |--.\.venv\Scripts\python.exe rags\RAGPipeline.py --permission-level L2 --question "新员工入职当天需要完成哪些事项？"
+|
+|--检查权限配置
+|   |--.\.venv\Scripts\python.exe nodes\auth\PermissionGuard.py --permission-level L3
+|
+|--删除 PDF 后清理向量库
+|   |--.\.venv\Scripts\python.exe nodes\embeddings\ChromaDocumentCleaner.py --document-name "文档名"
+
+
+注意事项：
+
+1. `__pycache__` 是 Python 运行生成的缓存目录，不属于业务结构说明重点。（没传）
+2. `retrieval_result.json`、`compressed_context.json`、`final_prompt.json` 是调试输出文件，可按需重新生成。（也没传）
+3. 不建议使用 PowerShell 的 `>` 保存 JSON，可能写成 UTF-16；优先使用脚本自带 `--output`。
+4. 权限配置依赖 Chroma metadata 中的 `document_name`，新增 PDF 后建议同步维护 `config/knowledge_permissions.json`。

@@ -1,5 +1,28 @@
 /.env
 /.idea
 /.venv
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local generated data
 /MinerUResult
 /.mineru_cache
+/ChromaDB
+ChromaDB/
+
+# RAG debug outputs
+/retrieval_result.json
+/compressed_context.json
+/final_prompt.json
+/retrieval_reranked.json
+/rag_trace_*.json
+/traces/
+/logs/
+
+# Local temp files
+*.tmp
+*.bak
+*.log

@@ -1,0 +1,346 @@
+NodeRAG 重排策略
+
+一、当前项目现状
+
+当前检索节点：
+
+|--nodes/retrieval/ChromaRetriever.py
+
+已有能力：
+
+1. 向量召回：使用百炼 embedding 生成 query 向量，从 Chroma 召回候选 chunk。
+2. BM25 召回：基于本地文本做关键词召回。
+3. 多 query 合并：原问题、改写问题、伪答案、关键词 query 合并召回。
+4. 轻量融合重排：当前 rerank_hits() 已融合以下信号：
+   |--vector_score_norm # 向量相似度归一化分
+   |--bm25_score_norm # BM25 分数归一化分
+   |--lexical_overlap_score # query 与 chunk 的词面覆盖率
+   |--source_bonus # 向量和 BM25 同时命中的加分
+   |--table_bonus # 表格问题命中 table_chunk 的加分
+5. MMR 去冗余：当前 mmr_select() 用于避免 top_k 结果全来自相似片段。
+6. Small-to-Big：命中小 chunk 后扩展上下文。
+
+当前缺口：
+
+1. 已新增独立规则重排节点，但还没有接入模型重排。
+2. 已支持权限过滤后的二次精排。
+3. 模型重排能力仍需后续扩展。
+4. 已输出基础重排 trace，但还缺少批量评测。
+5. 还没有针对不同问题类型的配置化策略切换。
+
+
+二、重排总体目标
+
+重排不是替代召回，而是在召回后提高上下文质量。
+
+核心目标：
+
+1. 让最可能回答问题的 chunk 排在前面。
+2. 降低相似但重复的 chunk 占比。
+3. 表格类、制度类、流程类问题使用不同信号加权。
+4. 保证无权限内容不会进入模型重排和 Prompt。
+5. 保留可解释字段，方便调试 RAG 效果。
+
+
+三、推荐链路位置
+
+完整 RAG 链路建议调整为：
+
+用户问题
+  -> IntentRouter
+  -> QuestionRewriter
+  -> PseudoAnswer
+  -> PermissionGuard # 检索前权限过滤
+  -> ChromaRetriever # 向量召回 + BM25 + 初排 + MMR
+  -> PermissionGuard # 检索后兜底过滤
+  -> Reranker # 独立重排节点，新增
+  -> ContextCompressor
+  -> PromptBuilder
+  -> LLM 最终回答
+
+关键原则：
+
+1. 如果 Reranker 会调用外部模型，必须放在权限过滤之后。
+2. ChromaRetriever 内部的 rerank_hits() 保留，用作第一阶段初排。
+3. 新增 Reranker 作为第二阶段精排，不直接替代召回节点。
+4. ContextCompressor 只接收重排后的 top_k / top_n 结果。
+
+
+四、两阶段重排设计
+
+第一阶段：Retriever 内部初排
+
+位置：
+
+|--nodes/retrieval/ChromaRetriever.py
+|   |--rerank_hits()
+|   |--mmr_select()
+
+作用：
+
+1. 处理候选量较大的召回结果。
+2. 低成本融合向量、BM25、关键词、结构信号。
+3. 先筛出一个较小的 rerank_pool。
+
+建议保留当前公式：
+
+rerank_score =
+  0.52 * vector_score_norm
+  + 0.30 * bm25_score_norm
+  + 0.18 * lexical_overlap_score
+  + source_bonus
+  + table_bonus
+
+可优化方向：
+
+1. 将权重变成配置项。
+2. 根据问题类型动态调整权重。
+3. 增加标题路径匹配分 title_path_score。
+4. 增加文档新鲜度或版本分 document_priority_score。
+
+
+第二阶段：独立 Reranker 精排
+
+当前节点：
+
+|--nodes/rerank/Reranker.py
+
+输入：
+
+|--question # 用户原问题
+|--rewrite_result # 改写问题和关键词，可选
+|--pseudo_answer_result # 伪答案，可选
+|--retrieval_result # PermissionGuard 过滤后的检索结果
+|--rerank_top_n # 参与精排的候选数量
+|--final_top_k # 精排后保留数量
+
+输出：
+
+|--retrieval_result # 保持原结构，更新 hits 顺序
+|   |--hits
+|       |--rerank_score
+|       |--rerank_stage
+|       |--rerank_reason
+|       |--rerank_features
+
+第一版已实现：
+
+1. 不先接复杂模型。
+2. 独立规则精排节点，把当前轻量信号进一步标准化。
+3. 增加 `rerank_features` 和 `rerank_reason`，记录每个 chunk 的得分来源。
+4. 已接入 RAGPipeline，插在权限过滤后、上下文压缩前。
+
+第二版再接模型精排：
+
+1. 百炼 rerank 模型，如果平台可用。
+2. Cross-Encoder，本地或服务化。
+3. LLM listwise rerank，只对 top 10-20 使用，控制成本。
+
+
+五、问题类型与权重策略
+
+建议根据 IntentRouter 或 QuestionRewriter 的结果粗分问题类型。
+
+1. 流程类问题
+
+示例：
+
+|--怎么申请
+|--流程是什么
+|--需要哪些步骤
+|--入职当天要做什么
+
+加权重点：
+
+|--标题路径匹配
+|--步骤词覆盖
+|--制度正文 chunk
+|--相邻上下文完整度
+
+2. 表格类问题
+
+示例：
+
+|--价格是多少
+|--等级对应关系
+|--预算金额
+|--薪酬标准
+
+加权重点：
+
+|--table_chunk
+|--表头匹配
+|--数字/金额/等级字段覆盖
+|--短 chunk 不应过度降权
+
+3. 定义类问题
+
+示例：
+
+|--什么是
+|--如何定义
+|--适用范围是什么
+
+加权重点：
+
+|--语义相似度
+|--标题匹配
+|--首段/定义段落
+
+4. 对比类问题
+
+示例：
+
+|--A 和 B 有什么区别
+|--新旧制度差异
+
+加权重点：
+
+|--多实体覆盖
+|--多个文档或多个章节的多样性
+|--MMR 多样性权重提高
+
+
+六、权限与重排的关系
+
+当前项目已有权限节点：
+
+|--nodes/auth/PermissionGuard.py
+
+重排必须遵守：
+
+1. 检索前通过 permission_level 限制 document_names。
+2. 检索后再次过滤 hits 和 expanded_context。
+3. 独立 Reranker 只能处理过滤后的 hits。
+4. 如果使用外部模型重排，不能把无权限 chunk 文本发给模型。
+
+推荐 Pipeline 插入位置：
+
+|--stage_retrieve
+|--stage_filter_retrieval_permission
+|--stage_rerank
+|--stage_compress
+
+
+七、配置建议
+
+建议后续新增：
+
+|--config/rerank_config.json
+
+配置示例：
+
+{
+  "enabled": true,
+  "mode": "rule",
+  "rerank_top_n": 20,
+  "final_top_k": 8,
+  "weights": {
+    "vector": 0.42,
+    "bm25": 0.25,
+    "lexical": 0.15,
+    "title_path": 0.10,
+    "source": 0.04,
+    "table": 0.04
+  },
+  "question_type_weights": {
+    "table": {
+      "table": 0.18,
+      "lexical": 0.20
+    },
+    "process": {
+      "title_path": 0.18,
+      "lexical": 0.18
+    }
+  }
+}
+
+
+八、重排节点边界
+
+Reranker 只负责排序，不负责：
+
+1. 不负责向量召回。
+2. 不负责权限判断。
+3. 不负责上下文压缩。
+4. 不负责最终回答。
+
+Reranker 可以做：
+
+1. 更新 hits 顺序。
+2. 截断 hits 数量。
+3. 增加 rerank_score。
+4. 增加 rerank_reason。
+5. 增加 rerank_features。
+
+
+九、第一版落地状态
+
+已完成：
+
+1. 拆分 `ChromaRetriever.py`，让每个脚本只负责一部分内容。
+2. 新增 `nodes/rerank/Reranker.py` 独立重排节点。
+3. 在 `RAGPipeline.py` 中新增 `stage_rerank`。
+4. 保持 `RetrievalResult` 结构兼容 `ContextCompressor.py`。
+
+当前文件：
+
+|--nodes/rerank/Reranker.py
+|--rags/RAGPipeline.py
+|   |--stage_rerank
+|--stage_filter_retrieval_permission
+|--stage_rerank
+|--stage_compress
+
+已新增配置：
+
+|--config/rerank_config.json
+
+当前可配置：
+
+|--rerank_top_n
+|--final_top_k
+|--use_mmr
+|--table_aware
+|--mmr_lambda
+|--weights.vector
+|--weights.bm25
+|--weights.lexical
+|--weights.title_path
+|--bonuses.multi_source
+|--bonuses.table_chunk
+
+后续建议：
+
+1. 增加评测脚本，比较重排前后效果。
+2. 接入模型重排作为可选模式。
+3. 根据问题类型增加配置化权重切换。
+
+
+十、第二版增强计划
+
+1. 接入百炼 rerank 模型或兼容 rerank API。
+2. 支持 rule / model / hybrid 三种模式。
+3. 对低置信度问题启用 LLM listwise rerank。
+4. 输出 rerank trace，记录原始排序、新排序、分数变化。
+5. 增加评测脚本，对比无重排、规则重排、模型重排的命中率和答案质量。
+
+
+十一、风险点
+
+1. 模型重排成本高：只对 top 10-20 做精排。
+2. 模型重排延迟高：默认规则重排，模型重排作为可选模式。
+3. 权限泄漏风险：模型重排必须放在权限过滤之后。
+4. 过度重排风险：不要让低质量关键词匹配压过高质量语义匹配。
+5. 表格问题风险：表格 chunk 通常短，不能只按文本长度或语义相似度判断。
+
+
+十二、推荐结论
+
+当前项目最合适的方案：
+
+1. 保留 ChromaRetriever.py 内置轻量初排和 MMR。
+2. 新增独立 Reranker 节点，作为权限过滤后的二阶段精排。
+3. 第一版先做规则重排和 trace，保证稳定可解释。
+4. 第二版再接百炼 rerank 或其他模型 rerank。
+5. 所有重排结果仍保持 RetrievalResult 结构，避免破坏 ContextCompressor 和 PromptBuilder。

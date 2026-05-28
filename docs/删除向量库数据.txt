@@ -1,0 +1,10 @@
+先删除pdf，再删除MinerUResult中对应的pdf的文件夹，最后运行脚本
+会得到一个类似的输出
+{
+  "deleted_document_count": 1,
+  "deleted_vector_count": 19,
+  "details": {
+    "HR基础制度库_c4f9a1d879b8": 19
+  },
+  "mode": "delete_by_document_id"
+}

@@ -32,6 +32,7 @@ from nodes.auth.PermissionGuard import (  # noqa: E402
     build_permission_context,
     filter_retrieval_result_by_permission,
 )
+from utils.RAGLogger import DEFAULT_LOG_FILE, RAGLogger, new_trace_id  # noqa: E402
 
 
 DEFAULT_TOP_K = 8
@@ -108,6 +109,8 @@ class RAGPipeline:
         rerank_config: str | Path = DEFAULT_RERANK_CONFIG_PATH,
         rerank_top_n: Optional[int] = None,
         disable_second_stage_rerank: bool = False,
+        log_enabled: bool = True,
+        log_file: str | Path = DEFAULT_LOG_FILE,
     ) -> None:
         self.top_k = top_k
         self.per_query_k = per_query_k
@@ -120,6 +123,7 @@ class RAGPipeline:
         self.rerank_top_n = int(rerank_top_n if rerank_top_n is not None else self.rerank_config.get("rerank_top_n", DEFAULT_RERANK_TOP_N))
         self.disable_second_stage_rerank = disable_second_stage_rerank
         self.permission_context = build_permission_context(permission_level, permission_config)
+        self.logger = RAGLogger(log_file=log_file, enabled=log_enabled)
         self.chat_client = OpenAICompatibleChatClient()
 
     def build_stages(self) -> List[PipelineStage]:
@@ -144,6 +148,7 @@ class RAGPipeline:
         chunk_types: Optional[Sequence[str]] = None,
     ) -> PipelineContext:
         return {
+            "trace_id": new_trace_id(),
             "question": question,
             "input_document_names": list(document_names or []),
             "input_chunk_types": list(chunk_types or []),
@@ -162,6 +167,57 @@ class RAGPipeline:
             "permission_context": self.permission_context,
             "permission_denied": False,
         }
+
+    def collect_stage_metrics(self, context: PipelineContext) -> Dict[str, Any]:
+        retrieval_inputs = context.get("retrieval_inputs") or {}
+        retrieval_result = context.get("retrieval_result") or {}
+        context_result = context.get("context_result") or {}
+        prompt_result = context.get("prompt_result") or {}
+
+        return {
+            "permission_level": self.permission_context.get("permission_level"),
+            "stop_pipeline": bool(context.get("stop_pipeline")),
+            "needs_retrieval": bool(context.get("needs_retrieval")),
+            "permission_denied": bool(context.get("permission_denied")),
+            "document_filter_count": len(retrieval_inputs.get("document_names") or []),
+            "chunk_type_filter_count": len(retrieval_inputs.get("chunk_types") or []),
+            "search_query_count": len(retrieval_inputs.get("search_queries") or []),
+            "keyword_query_count": len(retrieval_inputs.get("keyword_queries") or []),
+            "candidate_count": retrieval_result.get("candidate_count"),
+            "hit_count": retrieval_result.get("hit_count"),
+            "raw_vector_hit_count": retrieval_result.get("raw_vector_hit_count"),
+            "raw_bm25_hit_count": retrieval_result.get("raw_bm25_hit_count"),
+            "rerank": retrieval_result.get("rerank", {}),
+            "context_block_count": len(context_result.get("context_blocks") or []),
+            "citation_count": len(context_result.get("citations") or []),
+            "message_count": len(prompt_result.get("messages") or []),
+        }
+
+    def run_stage(self, stage: PipelineStage, context: PipelineContext) -> PipelineContext:
+        stage_name = getattr(stage, "__name__", str(stage))
+        started_at = self.logger.stage_start(
+            trace_id=context["trace_id"],
+            stage=stage_name,
+            metrics=self.collect_stage_metrics(context),
+        )
+        try:
+            next_context = stage(context)
+        except Exception as error:
+            self.logger.stage_error(
+                trace_id=context["trace_id"],
+                stage=stage_name,
+                started_at=started_at,
+                error=error,
+            )
+            raise
+
+        self.logger.stage_end(
+            trace_id=next_context["trace_id"],
+            stage=stage_name,
+            started_at=started_at,
+            metrics=self.collect_stage_metrics(next_context),
+        )
+        return next_context
 
     def stage_route(self, context: PipelineContext) -> PipelineContext:
         if self.skip_preprocess:
@@ -346,6 +402,7 @@ class RAGPipeline:
 
         if context.get("permission_denied"):
             return {
+                "trace_id": context["trace_id"],
                 "question": context["question"],
                 "answer": context.get("answer", ""),
                 "route": context.get("route_result"),
@@ -357,6 +414,7 @@ class RAGPipeline:
 
         if context.get("needs_retrieval") is False:
             return {
+                "trace_id": context["trace_id"],
                 "question": context["question"],
                 "answer": context.get("answer", ""),
                 "route": context.get("route_result"),
@@ -369,6 +427,7 @@ class RAGPipeline:
         prompt_result = context.get("prompt_result") or {}
 
         return {
+            "trace_id": context["trace_id"],
             "question": context["question"],
             "answer": context.get("answer", ""),
             "citations": prompt_result.get("citations", []),
@@ -401,13 +460,38 @@ class RAGPipeline:
             document_names=document_names,
             chunk_types=chunk_types,
         )
+        self.logger.log(
+            event="pipeline_start",
+            trace_id=context["trace_id"],
+            question_length=len(question),
+            permission_level=self.permission_context.get("permission_level"),
+        )
 
-        for stage in self.build_stages():
-            context = stage(context)
-            if context.get("stop_pipeline"):
-                break
+        try:
+            for stage in self.build_stages():
+                context = self.run_stage(stage, context)
+                if context.get("stop_pipeline"):
+                    break
 
-        return self.build_result(context)
+            result = self.build_result(context)
+            self.logger.log(
+                event="pipeline_end",
+                trace_id=context["trace_id"],
+                status="ok",
+                elapsed_ms=round((time.time() - context["started_at"]) * 1000, 3),
+                metrics=self.collect_stage_metrics(context),
+            )
+            return result
+        except Exception as error:
+            self.logger.log(
+                event="pipeline_error",
+                trace_id=context["trace_id"],
+                status="error",
+                elapsed_ms=round((time.time() - context["started_at"]) * 1000, 3),
+                error_type=type(error).__name__,
+                error_message=str(error),
+            )
+            raise
 
 
 def print_answer(result: Dict[str, Any], show_trace: bool = False) -> None:
@@ -462,6 +546,8 @@ def run_interactive(args: argparse.Namespace) -> None:
         rerank_config=args.rerank_config,
         rerank_top_n=args.rerank_top_n,
         disable_second_stage_rerank=args.no_second_stage_rerank,
+        log_enabled=not args.no_log,
+        log_file=args.log_file,
     )
 
     allowed_names = "、".join(pipeline.permission_context.get("allowed_knowledge_bases", []))
@@ -503,6 +589,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rerank-config", default=str(DEFAULT_RERANK_CONFIG_PATH), help="二阶段重排配置 JSON 路径。")
     parser.add_argument("--rerank-top-n", type=int, help="覆盖重排配置中的 rerank_top_n。")
     parser.add_argument("--no-second-stage-rerank", action="store_true", help="关闭权限过滤后的二阶段重排。")
+    parser.add_argument("--log-file", default=str(DEFAULT_LOG_FILE), help="日志根目录或具体 JSONL 文件路径。默认按 logs/YYYY/MM/YYYY-MM-DD.jsonl 分文件。")
+    parser.add_argument("--no-log", action="store_true", help="关闭 Pipeline JSONL 日志。")
     parser.add_argument("--show-trace", action="store_true", help="打印完整链路 JSON。")
     parser.add_argument("--trace-dir", help="保存每轮完整链路 JSON 的目录。")
     parser.add_argument("--output", "-o", help="单次问题时输出 JSON 文件。")
@@ -533,6 +621,8 @@ def main() -> Optional[Dict[str, Any]]:
         rerank_config=args.rerank_config,
         rerank_top_n=args.rerank_top_n,
         disable_second_stage_rerank=args.no_second_stage_rerank,
+        log_enabled=not args.no_log,
+        log_file=args.log_file,
     )
     result = pipeline.run(
         question=question,

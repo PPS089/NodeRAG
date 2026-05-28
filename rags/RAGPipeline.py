@@ -18,6 +18,7 @@ from nodes.query.IntentRouter import route_intent  # noqa: E402
 from nodes.query.LLMClient import OpenAICompatibleChatClient  # noqa: E402
 from nodes.query.PseudoAnswer import generate_pseudo_answer  # noqa: E402
 from nodes.query.QuestionRewriter import rewrite_question  # noqa: E402
+from nodes.rerank.Reranker import DEFAULT_RERANK_TOP_N, rerank_retrieval_result  # noqa: E402
 from nodes.retrieval.ChromaRetriever import retrieve  # noqa: E402
 from nodes.auth.PermissionGuard import (  # noqa: E402
     DEFAULT_CONFIG_PATH as DEFAULT_PERMISSION_CONFIG_PATH,
@@ -99,6 +100,8 @@ class RAGPipeline:
         skip_preprocess: bool = False,
         permission_level: str = DEFAULT_PERMISSION_LEVEL,
         permission_config: str | Path = DEFAULT_PERMISSION_CONFIG_PATH,
+        rerank_top_n: int = DEFAULT_RERANK_TOP_N,
+        disable_second_stage_rerank: bool = False,
     ) -> None:
         self.top_k = top_k
         self.per_query_k = per_query_k
@@ -106,6 +109,8 @@ class RAGPipeline:
         self.max_blocks = max_blocks
         self.temperature = temperature
         self.skip_preprocess = skip_preprocess
+        self.rerank_top_n = rerank_top_n
+        self.disable_second_stage_rerank = disable_second_stage_rerank
         self.permission_context = build_permission_context(permission_level, permission_config)
         self.chat_client = OpenAICompatibleChatClient()
 
@@ -118,6 +123,7 @@ class RAGPipeline:
             self.stage_apply_permission,
             self.stage_retrieve,
             self.stage_filter_retrieval_permission,
+            self.stage_rerank,
             self.stage_compress,
             self.stage_prompt,
             self.stage_answer,
@@ -141,6 +147,7 @@ class RAGPipeline:
             "pseudo_answer_result": None,
             "retrieval_inputs": {},
             "retrieval_result": None,
+            "rerank_result": None,
             "context_result": None,
             "prompt_result": None,
             "answer": None,
@@ -247,7 +254,8 @@ class RAGPipeline:
             document_names=retrieval_inputs.get("document_names") or [],
             chunk_types=retrieval_inputs.get("chunk_types") or [],
             per_query_k=self.per_query_k,
-            top_k=self.top_k,
+            rerank_pool_size=max(self.rerank_top_n, self.top_k),
+            top_k=max(self.rerank_top_n, self.top_k),
             expand_context=True,
         )
         return context
@@ -260,6 +268,28 @@ class RAGPipeline:
             context["retrieval_result"],
             self.permission_context,
         )
+        return context
+
+    def stage_rerank(self, context: PipelineContext) -> PipelineContext:
+        if context.get("stop_pipeline") or self.disable_second_stage_rerank:
+            return context
+
+        retrieval_inputs = context.get("retrieval_inputs") or {}
+        query_texts = unique_keep_order(
+            [context["question"]]
+            + list(retrieval_inputs.get("search_queries") or [])
+            + list(retrieval_inputs.get("keyword_queries") or [])
+            + ([retrieval_inputs.get("pseudo_answer_text")] if retrieval_inputs.get("pseudo_answer_text") else [])
+        )
+        context["retrieval_result"] = rerank_retrieval_result(
+            retrieval_result=context["retrieval_result"],
+            query_texts=query_texts,
+            rerank_top_n=self.rerank_top_n,
+            final_top_k=self.top_k,
+            use_mmr=True,
+            table_aware=True,
+        )
+        context["rerank_result"] = context["retrieval_result"].get("rerank", {})
         return context
 
     def stage_compress(self, context: PipelineContext) -> PipelineContext:
@@ -344,6 +374,7 @@ class RAGPipeline:
                 "queries": retrieval_result.get("queries"),
                 "keyword_queries": retrieval_result.get("keyword_queries"),
                 "permission": retrieval_result.get("permission", {}),
+                "rerank": retrieval_result.get("rerank", {}),
             },
             "context_stats": prompt_result.get("context_stats", {}),
             "needs_retrieval": True,
@@ -419,6 +450,8 @@ def run_interactive(args: argparse.Namespace) -> None:
         skip_preprocess=args.skip_preprocess,
         permission_level=permission_level,
         permission_config=args.permission_config,
+        rerank_top_n=args.rerank_top_n,
+        disable_second_stage_rerank=args.no_second_stage_rerank,
     )
 
     allowed_names = "、".join(pipeline.permission_context.get("allowed_knowledge_bases", []))
@@ -457,6 +490,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-preprocess", action="store_true", help="跳过路由/改写/伪答案，直接检索原问题。")
     parser.add_argument("--permission-level", choices=["L1", "L2", "L3", "L4", "L5"], help="模拟用户权限等级。")
     parser.add_argument("--permission-config", default=str(DEFAULT_PERMISSION_CONFIG_PATH), help="知识库权限配置 JSON 路径。")
+    parser.add_argument("--rerank-top-n", type=int, default=DEFAULT_RERANK_TOP_N, help="二阶段重排候选数量。")
+    parser.add_argument("--no-second-stage-rerank", action="store_true", help="关闭权限过滤后的二阶段重排。")
     parser.add_argument("--show-trace", action="store_true", help="打印完整链路 JSON。")
     parser.add_argument("--trace-dir", help="保存每轮完整链路 JSON 的目录。")
     parser.add_argument("--output", "-o", help="单次问题时输出 JSON 文件。")
@@ -484,6 +519,8 @@ def main() -> Optional[Dict[str, Any]]:
         skip_preprocess=args.skip_preprocess,
         permission_level=resolve_permission_level(args),
         permission_config=args.permission_config,
+        rerank_top_n=args.rerank_top_n,
+        disable_second_stage_rerank=args.no_second_stage_rerank,
     )
     result = pipeline.run(
         question=question,

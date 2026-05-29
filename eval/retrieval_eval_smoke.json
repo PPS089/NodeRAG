@@ -1,0 +1,114 @@
+{
+  "eval_file": "D:\\Project\\RAG\\NodeRAG\\eval\\rag_retrieval_eval.jsonl",
+  "k_values": [
+    1,
+    3,
+    5,
+    8
+  ],
+  "retrieval_config": {
+    "per_query_k": 12,
+    "bm25_k": 20,
+    "rerank_pool_size": 40,
+    "top_k": 8,
+    "use_bm25": true,
+    "use_mmr": true,
+    "table_aware": true,
+    "expand_context": true
+  },
+  "summary": {
+    "case_count": 1,
+    "mrr": 1.0,
+    "doc_hit@1": 1.0,
+    "doc_recall@1": 1.0,
+    "keyword_recall@1": 1.0,
+    "doc_hit@3": 1.0,
+    "doc_recall@3": 1.0,
+    "keyword_recall@3": 1.0,
+    "doc_hit@5": 1.0,
+    "doc_recall@5": 1.0,
+    "keyword_recall@5": 1.0,
+    "doc_hit@8": 1.0,
+    "doc_recall@8": 1.0,
+    "keyword_recall@8": 1.0,
+    "by_category": {
+      "scope": {
+        "case_count": 1,
+        "mrr": 1.0,
+        "doc_hit@1": 1.0,
+        "doc_recall@1": 1.0,
+        "keyword_recall@1": 1.0,
+        "doc_hit@3": 1.0,
+        "doc_recall@3": 1.0,
+        "keyword_recall@3": 1.0,
+        "doc_hit@5": 1.0,
+        "doc_recall@5": 1.0,
+        "keyword_recall@5": 1.0,
+        "doc_hit@8": 1.0,
+        "doc_recall@8": 1.0,
+        "keyword_recall@8": 1.0
+      }
+    }
+  },
+  "details": [
+    {
+      "id": "PUBLIC-001",
+      "question": "公司公开制度库原则上收录哪些资料？哪些内容不属于公开制度库范围？",
+      "category": "scope",
+      "required_permission_level": "L1",
+      "expected_documents": [
+        "公司公开制度库"
+      ],
+      "expected_keywords": [
+        "基础管理制度",
+        "行为规范",
+        "办公规则",
+        "内部公告",
+        "薪酬",
+        "个人隐私",
+        "商业价格",
+        "合同文本",
+        "预算数据"
+      ],
+      "first_expected_doc_rank": 1,
+      "mrr": 1.0,
+      "top_documents": [
+        "公司公开制度库",
+        "公司公开制度库",
+        "公司公开制度库",
+        "公司公开制度库",
+        "公司公开制度库",
+        "公司公开制度库",
+        "公司公开制度库",
+        "公司公开制度库"
+      ],
+      "top_chunk_ids": [
+        "text_chunk_527e29b47076",
+        "text_chunk_dc89d8c62c9f",
+        "text_chunk_77cc4658a26c",
+        "table_chunk_6a7619df2a95",
+        "table_chunk_aa4945edd8ab",
+        "table_chunk_dee1042c9e5b",
+        "text_chunk_cb83d0a91821",
+        "text_chunk_50bf6bc4f1dd"
+      ],
+      "hit_count": 8,
+      "doc_recall@1": 1.0,
+      "doc_recall@3": 1.0,
+      "doc_recall@5": 1.0,
+      "doc_recall@8": 1.0,
+      "doc_hit@1": true,
+      "doc_hit@3": true,
+      "doc_hit@5": true,
+      "doc_hit@8": true,
+      "keyword_recall@1": 1.0,
+      "keyword_recall@3": 1.0,
+      "keyword_recall@5": 1.0,
+      "keyword_recall@8": 1.0,
+      "chunk_hit@1": null,
+      "chunk_hit@3": null,
+      "chunk_hit@5": null,
+      "chunk_hit@8": null
+    }
+  ]
+}

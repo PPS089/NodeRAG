@@ -1,0 +1,178 @@
+================================================================================
+  EnhancedRAGPipeline vs RAGPipeline — 差异对比文档
+  生成时间: 2026-05-30
+================================================================================
+
+一、架构关系
+--------------------------------------------------------------------------------
+
+  RAGPipeline              EnhancedRAGPipeline
+  ───────────              ───────────────────
+  独立基类                  独立类（不再继承 RAGPipeline）
+  12 个 stage 方法          23 个方法（全部自包含）
+  无外部依赖（仅 nodes）     导入 RAGPipeline 模块的常量/工具函数
+
+  ** 本次重构：EnhancedRAGPipeline 已解除对 RAGPipeline 的继承关系，
+     所有必要方法均已内联，两文件可独立演化。
+
+
+二、类结构对比
+--------------------------------------------------------------------------------
+
+  RAGPipeline                       EnhancedRAGPipeline
+  ───────────                       ───────────────────
+  class RAGPipeline:                class EnhancedRAGPipeline:
+    __init__                          __init__          ← 独立初始化所有属性
+    resolve_pipeline_mode (static)    resolve_pipeline_mode (static)
+    build_stages                      build_stages      ← 覆盖：并行预处理 + 增强 stage
+    create_context                    create_context    ← 搬入
+    run_stage                         run_stage         ← 搬入
+    collect_stage_metrics             collect_stage_metrics ← 内联父类逻辑 + 增强指标
+    build_result                      build_result      ← 内联父类逻辑 + 增强字段
+    stage_route                       stage_route       ← 搬入
+    stage_rewrite                     —                 ← 已删除，合并到下方
+    stage_pseudo_answer               —                 ← 已删除，合并到下方
+    —                                 stage_preprocess_parallel  ← ★ 新增：并行预处理
+    stage_prepare_retrieval           stage_prepare_retrieval    ← 搬入
+    stage_apply_permission            stage_apply_permission     ← 搬入
+    stage_retrieve                    stage_retrieve             ← 搬入
+    stage_filter_retrieval_permission stage_filter_retrieval_permission ← 搬入
+    —                                 stage_bm25_rescore         ← ★ 增强 1
+    —                                 stage_auto_merge           ← ★ 增强 2
+    —                                 stage_grade                ← ★ 增强 3
+    stage_rerank                      stage_rerank               ← 搬入
+    stage_compress                    stage_compress             ← 搬入
+    stage_prompt                      stage_prompt               ← 搬入
+    stage_answer                      stage_answer               ← 搬入
+    —                                 _rewrite_and_prepare_retry ← ★ Grade 回流改写
+    —                                 _finish                    ← ★ 统一收尾
+    run                               run                        ← 覆盖：3 阶段 + 回流循环
+
+
+三、Stage 执行顺序对比
+--------------------------------------------------------------------------------
+
+  RAGPipeline (standalone):
+    route → rewrite → pseudo_answer → prepare_retrieval
+    → apply_permission → retrieve → filter_permission
+    → rerank → compress → prompt → answer
+
+  EnhancedRAGPipeline:
+    route → preprocess_parallel ─┐
+    (内部并行: rewrite │ pseudo)  ← ★ 并行化
+                                 ┘
+    → prepare_retrieval → apply_permission → retrieve → filter_permission
+    → bm25_rescore    ← ★ 新增
+    → auto_merge      ← ★ 新增
+    → grade           ← ★ 新增
+        ↓ 不通过 → _rewrite_and_prepare_retry → 回流到 retrieve（最多 N 次）
+    → rerank → compress → prompt → answer
+
+
+四、关键差异详解
+--------------------------------------------------------------------------------
+
+  ┌────────────────────┬─────────────────────────────┬──────────────────────────────┐
+  │ 差异点             │ RAGPipeline                 │ EnhancedRAGPipeline          │
+  ├────────────────────┼─────────────────────────────┼──────────────────────────────┤
+  │ 预处理 LLM 调用    │ 串行：rewrite 等待完成       │ 并行：ThreadPoolExecutor     │
+  │                    │ 后再调用 pseudo_answer       │ 同时发起两个 HTTP 请求       │
+  │                    │ 耗时 = T1 + T2               │ 耗时 ≈ max(T1, T2)           │
+  ├────────────────────┼─────────────────────────────┼──────────────────────────────┤
+  │ BM25 重打分        │ 无                          │ BM25StateManager 持久化 IDF  │
+  │                    │                             │ 对检索结果按 BM25 重排序     │
+  ├────────────────────┼─────────────────────────────┼──────────────────────────────┤
+  │ 父子层级合并       │ 无                          │ AutoMerger：多子块命中同一   │
+  │                    │                             │ 父块时合并为父块扩大上下文   │
+  ├────────────────────┼─────────────────────────────┼──────────────────────────────┤
+  │ 相关性评估+回流    │ 无                          │ GradeAndRewrite：LLM 评估    │
+  │                    │                             │ 检索质量，不通过则改写查询   │
+  │                    │                             │ 回流重新检索（可配置重试）   │
+  ├────────────────────┼─────────────────────────────┼──────────────────────────────┤
+  │ run() 结构         │ 简单 for 循环遍历 stage     │ 3 阶段：预处理 → 检索(回流)  │
+  │                    │ stop_pipeline 时 break       │ → 后处理，含 grade 回流循环  │
+  ├────────────────────┼─────────────────────────────┼──────────────────────────────┤
+  │ build_result()     │ 基础字段：trace/answer/      │ 继承全部基础字段 +           │
+  │                    │ route/rewrite/pseudo_answer  │ enhanced/grade/auto_merge/   │
+  │                    │ /retrieval/context_stats     │ bm25_rescore 元信息          │
+  ├────────────────────┼─────────────────────────────┼──────────────────────────────┤
+  │ collect_stage_     │ 基础：pipeline_mode/         │ 继承全部基础指标 +           │
+  │ metrics()          │ permission/hit_count/        │ auto_merge/grade/bm25 指标   │
+  │                    │ rerank/context_blocks 等     │                              │
+  ├────────────────────┼─────────────────────────────┼──────────────────────────────┤
+  │ CLI 参数           │ --mode/--fast/--top-k/       │ 全部继承 +                   │
+  │                    │ --permission-level/          │ --no-bm25-rescore            │
+  │                    │ --rerank-config/--output 等  │ --no-auto-merge              │
+  │                    │                             │ --no-grade-rewrite           │
+  │                    │                             │ --grade-max-retry            │
+  │                    │                             │ --auto-merge-threshold 等    │
+  ├────────────────────┼─────────────────────────────┼──────────────────────────────┤
+  │ 初始化依赖         │ 直接从各节点模块导入        │ 常量/工具函数从 RAGPipeline  │
+  │                    │                             │ 模块导入；其他直接从节点导入 │
+  │                    │                             │ 不依赖 RAGPipeline 类        │
+  └────────────────────┴─────────────────────────────┴──────────────────────────────┘
+
+
+五、新增 stage_preprocess_parallel 实现细节
+--------------------------------------------------------------------------------
+
+  def stage_preprocess_parallel(self, context):
+      if self.pipeline_mode == "fast" or context.get("stop_pipeline"):
+          return context
+
+      question = context["question"]
+
+      with ThreadPoolExecutor(max_workers=2) as executor:
+          future_rewrite = executor.submit(rewrite_question, question)
+          future_pseudo  = executor.submit(generate_pseudo_answer, question)
+
+          context["rewrite_result"]       = future_rewrite.result()
+          context["pseudo_answer_result"] = future_pseudo.result()
+
+      return context
+
+  设计要点：
+  - rewrite_question 和 generate_pseudo_answer 各自创建独立的
+    OpenAICompatibleChatClient 实例，线程安全
+  - ThreadPoolExecutor max_workers=2，两个调用同时发起
+  - future.result() 会传播异常，与串行版行为一致
+  - fast 模式或 stop_pipeline 时直接跳过，保持兼容
+
+
+六、增强功能开关
+--------------------------------------------------------------------------------
+
+  EnhancedRAGPipeline.__init__ 新增参数：
+
+  enable_bm25_rescore: bool = True     # 是否启用 BM25 持久化重打分
+  enable_auto_merge: bool = True       # 是否启用父子层级自动合并
+  enable_grade_rewrite: bool = True    # 是否启用相关性评估+回流
+  grade_max_retry: int = 2             # Grade 不通过时最大重试次数
+  auto_merge_threshold: int = 2        # 触发合并的子块命中数阈值
+  auto_merge_max_steps: int = 2        # 合并最大步数
+  bm25_state_path: str | Path = None   # BM25 状态文件路径
+
+  所有增强功能均可独立关闭，关闭后行为退化到与 RAGPipeline 一致。
+
+
+七、import 依赖对比
+--------------------------------------------------------------------------------
+
+  RAGPipeline imports:              EnhancedRAGPipeline additional imports:
+  ────────────────                  ──────────────────────────────────
+  context.ContextCompressor         (from RAGPipeline module:)
+  prompt.PromptBuilder                DEFAULT_TOP_K, DEFAULT_PER_QUERY_K
+  query.IntentRouter                  DEFAULT_MAX_CONTEXT_CHARS, DEFAULT_MAX_BLOCKS
+  query.LLMClient                     PipelineContext, build_direct_answer
+  query.PseudoAnswer                  extract_route_*, normalize_list, unique_keep_order
+  query.QuestionRewriter
+  rerank.Reranker                   (direct node imports:)
+  retrieval.ChromaRetriever           query.LLMClient (OpenAICompatibleChatClient)
+  auth.PermissionGuard                query.IntentRouter (route_intent)
+  utils.RAGLogger                     query.QuestionRewriter (rewrite_question)
+                                      query.PseudoAnswer (generate_pseudo_answer)
+                                    (enhanced modules:)
+                                      retrieval.AutoMerger
+                                      retrieval.BM25State
+                                      retrieval.GradeAndRewrite
+

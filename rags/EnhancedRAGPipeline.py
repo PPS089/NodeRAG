@@ -163,7 +163,7 @@ class EnhancedRAGPipeline:
         )
         self.disable_second_stage_rerank = disable_second_stage_rerank
         self.permission_context = build_permission_context(permission_level, permission_config or "")
-        self.logger = RAGLogger(log_file=log_file or "", enabled=log_enabled)
+        self.logger = RAGLogger(log_file=log_file or "", enabled=log_enabled, pipeline_name="EnhancedRAGPipeline")
         self.chat_client = OpenAICompatibleChatClient()
 
         # ---- 增强功能开关 ----

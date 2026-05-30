@@ -47,9 +47,15 @@ def safe_json_value(value: Any) -> Any:
 
 
 class RAGLogger:
-    def __init__(self, log_file: str | Path = DEFAULT_LOG_FILE, enabled: bool = True) -> None:
+    def __init__(
+        self,
+        log_file: str | Path = DEFAULT_LOG_FILE,
+        enabled: bool = True,
+        pipeline_name: str = "",
+    ) -> None:
         self.log_target = Path(log_file)
         self.enabled = enabled
+        self.pipeline_name = pipeline_name
 
     def resolve_log_file(self) -> Path:
         if self.log_target.suffix:
@@ -63,6 +69,7 @@ class RAGLogger:
         payload: Dict[str, Any] = {
             "ts": shanghai_now_iso(),
             "timezone": "Asia/Shanghai",
+            "pipeline": self.pipeline_name,
             "trace_id": trace_id,
             "event": event,
         }

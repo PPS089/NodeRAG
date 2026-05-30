@@ -126,7 +126,7 @@ class RAGPipeline:
         self.rerank_top_n = int(rerank_top_n if rerank_top_n is not None else self.rerank_config.get("rerank_top_n", DEFAULT_RERANK_TOP_N))
         self.disable_second_stage_rerank = disable_second_stage_rerank
         self.permission_context = build_permission_context(permission_level, permission_config)
-        self.logger = RAGLogger(log_file=log_file, enabled=log_enabled)
+        self.logger = RAGLogger(log_file=log_file, enabled=log_enabled, pipeline_name="RAGPipeline")
         self.chat_client = OpenAICompatibleChatClient()
 
     @staticmethod

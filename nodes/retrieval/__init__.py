@@ -19,8 +19,6 @@ from nodes.retrieval.BM25State import (
     get_bm25_state_manager as bm25_state,
 )
 
-from nodes.retrieval.ChromaRetriever import retrieve
-
 from nodes.retrieval.bm25_recall import bm25_recall
 
 from nodes.retrieval.retrieval_config import (

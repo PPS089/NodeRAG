@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "merge_threshold": 2,
+  "max_merge_steps": 2,
+  "merge_levels": [3, 2, 1]
+}

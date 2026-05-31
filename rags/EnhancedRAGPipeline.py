@@ -32,6 +32,7 @@ EnhancedRAGPipeline — 增强型 RAG 管线（独立实现，不继承 RAGPipel
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -90,6 +91,9 @@ from nodes.auth.PermissionGuard import (  # noqa: E402
 # ---- 日志 ----
 from utils.RAGLogger import DEFAULT_LOG_FILE, RAGLogger, new_trace_id  # noqa: E402
 
+# ---- RAGAS 评估 ----
+from eval.RagasEval import evaluate_single  # noqa: E402
+
 # ---- 增强模块 ----
 from nodes.retrieval.AutoMerger import (  # noqa: E402
     integrate_auto_merge_to_retrieval,
@@ -118,7 +122,7 @@ PIPELINE_MODES = {"standard", "fast"}
 # ---------------------------------------------------------------------------
 
 class EnhancedRAGPipeline:
-    """增强型 RAG Pipeline：BM25 持久化 + AutoMerge + Grade&Rewrite 回流 + 并行预处理。"""
+    """增强型 RAG Pipeline：BM25 持久化 + AutoMerge + Grade&Rewrite 回流 + 并行预处理 + RAGAS 评估。"""
 
     def __init__(
         self,
@@ -141,6 +145,7 @@ class EnhancedRAGPipeline:
         enable_bm25_rescore: bool = True,
         enable_auto_merge: bool = True,
         enable_grade_rewrite: bool = True,
+        enable_ragas_eval: Optional[bool] = None,
         # ---- AutoMerger 参数 ----
         auto_merge_config: str | Path | None = None,
         auto_merge_threshold: int = 2,
@@ -150,6 +155,8 @@ class EnhancedRAGPipeline:
         grade_use_structured_output: bool = True,
         # ---- BM25State 参数 ----
         bm25_state_path: str | Path | None = None,
+        # ---- RAGAS 评估参数 ----
+        ragas_metrics: Optional[list] = None,
     ) -> None:
         # ---- 管线核心属性 ----
         self.top_k = top_k
@@ -175,6 +182,10 @@ class EnhancedRAGPipeline:
         self.enable_bm25_rescore = enable_bm25_rescore
         self.enable_auto_merge = enable_auto_merge
         self.enable_grade_rewrite = enable_grade_rewrite
+        if enable_ragas_eval is None:
+            enable_ragas_eval = os.getenv("RAGAS_EVAL_ENABLED", "false").lower() in ("1", "true", "yes", "y", "on")
+        self.enable_ragas_eval = enable_ragas_eval
+        self.ragas_metrics = ragas_metrics or ["faithfulness", "answer_relevancy"]
 
         # ---- AutoMerger 参数 ----
         self.auto_merge_config_path = auto_merge_config or DEFAULT_AUTO_MERGE_CONFIG
@@ -326,6 +337,7 @@ class EnhancedRAGPipeline:
             self.stage_compress,
             self.stage_prompt,
             self.stage_answer,
+            self.stage_ragas_eval,         # ← 新增 RAGAS 评估
         ]
 
     # ------------------------------------------------------------------
@@ -555,6 +567,55 @@ class EnhancedRAGPipeline:
         return context
 
     # ------------------------------------------------------------------
+    # RAGAS 评估 Stage
+    # ------------------------------------------------------------------
+
+    def stage_ragas_eval(self, context: PipelineContext) -> PipelineContext:
+        """在答案生成后运行 RAGAS 风格评估（Faithfulness + Answer Relevancy）。
+
+        仅在 enable_ragas_eval=True 且管线未提前终止时生效。
+        """
+        if context.get("stop_pipeline"):
+            return context
+
+        if not self.enable_ragas_eval:
+            context["ragas_eval"] = {"skipped": True, "reason": "ragas_eval_disabled"}
+            return context
+
+        question = context.get("question", "")
+        answer = context.get("answer", "")
+        retrieval_result = context.get("retrieval_result")
+
+        if not answer:
+            context["ragas_eval"] = {"skipped": True, "reason": "empty_answer"}
+            return context
+
+        try:
+            eval_result = evaluate_single(
+                question=question,
+                answer=answer,
+                retrieval_result=retrieval_result,
+                metrics=self.ragas_metrics,
+            )
+            context["ragas_eval"] = eval_result
+            self.logger.log(
+                event="ragas_eval",
+                trace_id=context["trace_id"],
+                faithfulness=eval_result.get("faithfulness", {}).get("score"),
+                answer_relevancy=eval_result.get("answer_relevancy", {}).get("score"),
+            )
+        except Exception as error:
+            context["ragas_eval"] = {"error": str(error), "error_type": type(error).__name__}
+            self.logger.log(
+                event="ragas_eval_error",
+                trace_id=context["trace_id"],
+                error_type=type(error).__name__,
+                error_message=str(error),
+            )
+
+        return context
+
+    # ------------------------------------------------------------------
     # 增强 Stage 1：BM25 持久化重打分
     # ------------------------------------------------------------------
 
@@ -750,6 +811,7 @@ class EnhancedRAGPipeline:
                     "auto_merge_enabled": self.enable_auto_merge,
                     "grade_rewrite_enabled": self.enable_grade_rewrite,
                 },
+                "ragas_eval": context.get("ragas_eval") or {},
             }
 
         if context.get("needs_retrieval") is False:
@@ -767,6 +829,7 @@ class EnhancedRAGPipeline:
                     "auto_merge_enabled": self.enable_auto_merge,
                     "grade_rewrite_enabled": self.enable_grade_rewrite,
                 },
+                "ragas_eval": context.get("ragas_eval") or {},
             }
 
         retrieval_result = context.get("retrieval_result") or {}
@@ -807,6 +870,7 @@ class EnhancedRAGPipeline:
                 "grade_rewrite_enabled": self.enable_grade_rewrite,
                 "grade_max_retry": self.grade_max_retry,
             },
+            "ragas_eval": context.get("ragas_eval") or {},
         }
 
         return result
@@ -910,7 +974,10 @@ class EnhancedRAGPipeline:
             for stage in post_retrieval_stages:
                 context = self.run_stage(stage, context)
                 if context.get("stop_pipeline"):
-                    break
+                    return self._finish(context)
+
+            # ---- Phase 4: 评估阶段（不阻断流程）----
+            context = self.run_stage(self.stage_ragas_eval, context)
 
             return self._finish(context)
 
@@ -936,6 +1003,29 @@ class EnhancedRAGPipeline:
             metrics=self.collect_stage_metrics(context),
         )
         return result
+
+
+# ---------------------------------------------------------------------------
+# CLI 辅助
+# ---------------------------------------------------------------------------
+
+def _print_ragas_eval(result: Dict[str, Any]) -> None:
+    """打印 RAGAS 评估分数到控制台。"""
+    ragas = result.get("ragas_eval") or {}
+    if not ragas or ragas.get("skipped") or ragas.get("error"):
+        return
+
+    parts = []
+    faith = ragas.get("faithfulness") or {}
+    if faith.get("score") is not None:
+        parts.append(f"忠实度={faith['score']:.0%} ({faith.get('supported', 0)}/{faith.get('total', 0)})")
+
+    relevancy = ragas.get("answer_relevancy") or {}
+    if relevancy.get("score") is not None:
+        parts.append(f"相关性={relevancy['score']:.0%}")
+
+    if parts:
+        print(f"\n[RAGAS] {' | '.join(parts)}")
 
 
 # ---------------------------------------------------------------------------
@@ -989,6 +1079,7 @@ if __name__ == "__main__":
     parser.add_argument("--grade-max-retry", type=int, default=DEFAULT_MAX_RETRY)
     parser.add_argument("--grade-no-structured", action="store_true", help="Grade 阶段不使用结构化输出")
     parser.add_argument("--bm25-state-path", help="BM25 状态文件路径")
+    parser.add_argument("--ragas-eval", action="store_true", default=None, help="启用 RAGAS 风格评估。未传时读取 RAGAS_EVAL_ENABLED 环境变量")
 
     args = parser.parse_args()
 
@@ -1027,6 +1118,7 @@ if __name__ == "__main__":
             grade_max_retry=args.grade_max_retry,
             grade_use_structured_output=not args.grade_no_structured,
             bm25_state_path=args.bm25_state_path,
+            enable_ragas_eval=args.ragas_eval,
         )
 
         allowed_names = "、".join(pipeline.permission_context.get("allowed_knowledge_bases", []))
@@ -1035,7 +1127,8 @@ if __name__ == "__main__":
         print(
             f"增强功能: BM25重打分={pipeline.enable_bm25_rescore}, "
             f"AutoMerge={pipeline.enable_auto_merge}, "
-            f"Grade&Rewrite={pipeline.enable_grade_rewrite}"
+            f"Grade&Rewrite={pipeline.enable_grade_rewrite}, "
+            f"RAGAS评估={pipeline.enable_ragas_eval}"
         )
         print(f"预处理: Rewrite + PseudoAnswer 并行")
         print(f"可访问知识库: {allowed_names or '无'}")
@@ -1054,6 +1147,7 @@ if __name__ == "__main__":
                 chunk_types=args.chunk_type,
             )
             print_answer(result, show_trace=args.show_trace)
+            _print_ragas_eval(result)
             if args.trace_dir:
                 trace_path = save_trace(result, args.trace_dir)
                 print(f"\nTrace 已保存: {trace_path}")
@@ -1082,6 +1176,7 @@ if __name__ == "__main__":
             grade_max_retry=args.grade_max_retry,
             grade_use_structured_output=not args.grade_no_structured,
             bm25_state_path=args.bm25_state_path,
+            enable_ragas_eval=args.ragas_eval,
         )
 
         result = pipeline.run(
@@ -1096,6 +1191,7 @@ if __name__ == "__main__":
             )
         else:
             print_answer(result, show_trace=args.show_trace)
+            _print_ragas_eval(result)
 
         if args.trace_dir:
             trace_path = save_trace(result, args.trace_dir)

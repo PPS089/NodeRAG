@@ -42,6 +42,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# ---- HTTP 重试（零侵入 monkey-patch，网络抖动时自动重试） ----
+from utils.http_retry import install_retry  # noqa: E402
+
+install_retry()
+
 # ---- 常量 & 工具函数（从 RAGPipeline 模块导入） ----
 from rags.RAGPipeline import (  # noqa: E402
     DEFAULT_MAX_BLOCKS,
